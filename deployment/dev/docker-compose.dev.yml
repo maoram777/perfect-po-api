@@ -1,0 +1,82 @@
+version: '3.8'
+
+services:
+  # FastAPI Application (Development)
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile.dev
+    container_name: perfect-po-api-dev
+    restart: unless-stopped
+    ports:
+      - "8000:8000"
+    environment:
+      - ENVIRONMENT=development
+      - DEBUG=true
+      - MONGODB_URI=${MONGODB_URI}
+      - REDIS_URL=redis://redis:6379
+      - AWS_REGION=${AWS_REGION:-us-east-1}
+      - KEEPA_API_KEY=${KEEPA_API_KEY}
+      - JWT_SECRET_KEY=${JWT_SECRET_KEY:-dev_secret_key_change_in_production}
+      - JWT_EXPIRATION_MINUTES=${JWT_EXPIRATION_MINUTES:-10080}
+    depends_on:
+      - redis
+    volumes:
+      - ./logs:/app/logs
+      - ./uploads:/app/uploads
+      - .:/app  # Mount source code for live reload
+    networks:
+      - perfect-po-dev-network
+    deploy:
+      resources:
+        limits:
+          memory: 1G
+          cpus: '0.5'
+        reservations:
+          memory: 512M
+          cpus: '0.25'
+
+  # Redis Cache (Development)
+  redis:
+    image: redis:7.2-alpine
+    container_name: perfect-po-redis-dev
+    restart: unless-stopped
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_dev_data:/data
+    networks:
+      - perfect-po-dev-network
+    deploy:
+      resources:
+        limits:
+          memory: 256M
+          cpus: '0.1'
+
+  # Nginx Reverse Proxy (Development - HTTP only)
+  nginx:
+    image: nginx:alpine
+    container_name: perfect-po-nginx-dev
+    restart: unless-stopped
+    ports:
+      - "80:80"
+    volumes:
+      - ./nginx.dev.conf:/etc/nginx/nginx.conf:ro
+      - ./logs/nginx:/var/log/nginx
+    depends_on:
+      - api
+    networks:
+      - perfect-po-dev-network
+    deploy:
+      resources:
+        limits:
+          memory: 128M
+          cpus: '0.1'
+
+volumes:
+  redis_dev_data:
+    driver: local
+
+networks:
+  perfect-po-dev-network:
+    driver: bridge

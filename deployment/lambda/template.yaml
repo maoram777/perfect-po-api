@@ -1,0 +1,261 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Description: Product Enrichment Infrastructure with SQS and Lambda
+
+Parameters:
+  Environment:
+    Type: String
+    Default: dev
+    Description: Environment name (dev, staging, prod)
+  
+  BatchSize:
+    Type: Number
+    Default: 20
+    Description: Number of products per SQS message batch
+    MinValue: 5
+    MaxValue: 50
+  
+  LambdaTimeout:
+    Type: Number
+    Default: 900
+    Description: Lambda function timeout in seconds (max 15 minutes)
+    MinValue: 60
+    MaxValue: 900
+  
+  LambdaMemory:
+    Type: Number
+    Default: 1024
+    Description: Lambda function memory in MB
+    AllowedValues: [512, 1024, 2048, 3008]
+
+Globals:
+  Function:
+    Timeout: !Ref LambdaTimeout
+    MemorySize: !Ref LambdaMemory
+    Environment:
+      Variables:
+        ENVIRONMENT: !Ref Environment
+        MONGODB_URI: !Ref MongoDBUri
+        KEEPA_API_KEY: !Ref KeepaApiKey
+        AWS_REGION: !Ref AWS::Region
+
+Resources:
+  # SQS Queue for Product Enrichment
+  ProductEnrichmentQueue:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: !Sub "${Environment}-product-enrichment-queue"
+      VisibilityTimeoutSeconds: !Ref LambdaTimeout
+      MessageRetentionPeriod: 1209600  # 14 days
+      ReceiveMessageWaitTimeSeconds: 20  # Long polling
+      RedrivePolicy:
+        deadLetterTargetArn: !GetAtt ProductEnrichmentDLQ.Arn
+        maxReceiveCount: 3
+      Tags:
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: Purpose
+          Value: Product Enrichment
+
+  # Dead Letter Queue for failed messages
+  ProductEnrichmentDLQ:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: !Sub "${Environment}-product-enrichment-dlq"
+      MessageRetentionPeriod: 1209600  # 14 days
+      Tags:
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: Purpose
+          Value: Product Enrichment Dead Letter
+
+  # Lambda Function for Product Enrichment
+  ProductEnrichmentFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub "${Environment}-product-enrichment"
+      CodeUri: ./lambda_enrichment_function.py
+      Handler: lambda_handler
+      Runtime: python3.11
+      Architectures:
+        - x86_64
+      ReservedConcurrencyLimit: 10  # Limit concurrent executions
+      Environment:
+        Variables:
+          SQS_QUEUE_URL: !Ref ProductEnrichmentQueue
+          BATCH_SIZE: !Ref BatchSize
+      Policies:
+        - SQSSendMessagePolicy:
+            QueueName: !GetAtt ProductEnrichmentQueue.QueueName
+        - SQSPollerPolicy:
+            QueueName: !GetAtt ProductEnrichmentQueue.QueueName
+        - DynamoDBCrudPolicy:
+            TableName: !Ref EnrichmentStatusTable
+        - SecretsManagerReadWrite:
+            SecretArn: !Sub "arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:*"
+      Events:
+        SQSEvent:
+          Type: SQS
+          Properties:
+            Queue: !GetAtt ProductEnrichmentQueue.Arn
+            BatchSize: 1  # Process one SQS message at a time
+            MaximumBatchingWindowInSeconds: 0
+
+  # DynamoDB Table for Enrichment Status Tracking
+  EnrichmentStatusTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Sub "${Environment}-enrichment-status"
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: catalog_id
+          AttributeType: S
+        - AttributeName: batch_id
+          AttributeType: S
+      KeySchema:
+        - AttributeName: catalog_id
+          KeyType: HASH
+        - AttributeName: batch_id
+          KeyType: RANGE
+      GlobalSecondaryIndexes:
+        - IndexName: UserIdIndex
+          KeySchema:
+            - AttributeName: user_id
+              KeyType: HASH
+            - AttributeName: created_at
+              KeyType: RANGE
+          Projection:
+            ProjectionType: ALL
+      Tags:
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: Purpose
+          Value: Enrichment Status Tracking
+
+  # CloudWatch Log Group for Lambda
+  ProductEnrichmentLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub "/aws/lambda/${ProductEnrichmentFunction}"
+      RetentionInDays: 14
+
+  # IAM Role for Lambda
+  ProductEnrichmentRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "${Environment}-product-enrichment-role"
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaVPCAccessExecutionRole
+      Policies:
+        - PolicyName: ProductEnrichmentPolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - sqs:SendMessage
+                  - sqs:ReceiveMessage
+                  - sqs:DeleteMessage
+                  - sqs:GetQueueAttributes
+                Resource: !GetAtt ProductEnrichmentQueue.Arn
+              - Effect: Allow
+                Action:
+                  - dynamodb:GetItem
+                  - dynamodb:PutItem
+                  - dynamodb:UpdateItem
+                  - dynamodb:DeleteItem
+                  - dynamodb:Query
+                  - dynamodb:Scan
+                Resource: !GetAtt EnrichmentStatusTable.Arn
+              - Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource: !Sub "arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/lambda/${ProductEnrichmentFunction}:*"
+
+  # CloudWatch Dashboard for Monitoring
+  EnrichmentDashboard:
+    Type: AWS::CloudWatch::Dashboard
+    Properties:
+      DashboardName: !Sub "${Environment}-Product-Enrichment-Dashboard"
+      DashboardBody: !Sub |
+        {
+          "widgets": [
+            {
+              "type": "metric",
+              "x": 0,
+              "y": 0,
+              "width": 12,
+              "height": 6,
+              "properties": {
+                "metrics": [
+                  ["AWS/Lambda", "Invocations", "FunctionName", "${ProductEnrichmentFunction}"],
+                  [".", "Errors", ".", "."],
+                  [".", "Duration", ".", "."]
+                ],
+                "view": "timeSeries",
+                "stacked": false,
+                "region": "${AWS::Region}",
+                "title": "Lambda Function Metrics"
+              }
+            },
+            {
+              "type": "metric",
+              "x": 12,
+              "y": 0,
+              "width": 12,
+              "height": 6,
+              "properties": {
+                "metrics": [
+                  ["AWS/SQS", "NumberOfMessagesSent", "QueueName", "${ProductEnrichmentQueue}"],
+                  [".", "NumberOfMessagesReceived", ".", "."],
+                  [".", "ApproximateNumberOfMessagesVisible", ".", "."]
+                ],
+                "view": "timeSeries",
+                "stacked": false,
+                "region": "${AWS::Region}",
+                "title": "SQS Queue Metrics"
+              }
+            }
+          ]
+        }
+
+Outputs:
+  ProductEnrichmentQueueUrl:
+    Description: URL of the Product Enrichment SQS Queue
+    Value: !Ref ProductEnrichmentQueue
+    Export:
+      Name: !Sub "${Environment}-ProductEnrichmentQueueUrl"
+
+  ProductEnrichmentQueueArn:
+    Description: ARN of the Product Enrichment SQS Queue
+    Value: !GetAtt ProductEnrichmentQueue.Arn
+    Export:
+      Name: !Sub "${Environment}-ProductEnrichmentQueueArn"
+
+  ProductEnrichmentFunctionArn:
+    Description: ARN of the Product Enrichment Lambda Function
+    Value: !GetAtt ProductEnrichmentFunction.Arn
+    Export:
+      Name: !Sub "${Environment}-ProductEnrichmentFunctionArn"
+
+  EnrichmentStatusTableName:
+    Description: Name of the Enrichment Status DynamoDB Table
+    Value: !Ref EnrichmentStatusTable
+    Export:
+      Name: !Sub "${Environment}-EnrichmentStatusTableName"
+
+  EnrichmentStatusTableArn:
+    Description: ARN of the Enrichment Status DynamoDB Table
+    Value: !GetAtt EnrichmentStatusTable.Arn
+    Export:
+      Name: !Sub "${Environment}-EnrichmentStatusTableArn"
