@@ -824,7 +824,7 @@ class LocalEnrichmentService:
             return None
         except Exception as e:
             logger.error(f"Error extracting images: {e}")
-            return None
+        return None
     
     async def get_enrichment_providers(self) -> List[str]:
         """Get list of available enrichment providers."""
