@@ -36,7 +36,7 @@ print(f"   JWT_SECRET_KEY: {os.environ.get('JWT_SECRET_KEY', 'NOT SET')[:10] if 
 
 class Settings:
     # Database Configuration
-    mongodb_url: str = config("MONGODB_URL", default="mongodb://localhost:27017/perfect_po_db")
+    mongodb_url: str = config("MONGODB_URL")  # No fallback - must be set
     
     # AWS Configuration
     aws_access_key_id: Optional[str] = config("AWS_ACCESS_KEY_ID", default=None)
@@ -46,7 +46,7 @@ class Settings:
     sqs_queue_url: Optional[str] = config("SQS_QUEUE_URL", default=None)
     
     # JWT Configuration
-    jwt_secret_key: str = config("JWT_SECRET_KEY", default="your_super_secret_jwt_key_here")
+    jwt_secret_key: str = config("JWT_SECRET_KEY")  # No fallback - must be set
     jwt_algorithm: str = config("JWT_ALGORITHM", default="HS256")
     jwt_expiration_minutes: int = config("JWT_EXPIRATION_MINUTES", default=10080, cast=int)  # 1 week (7 days * 24 hours * 60 minutes)
     
@@ -58,7 +58,7 @@ class Settings:
     # External APIs
     amazon_api_key: Optional[str] = config("AMAZON_API_KEY", default=None)
     amazon_api_secret: Optional[str] = config("AMAZON_API_SECRET", default=None)
-    keepa_api_key: Optional[str] = config("KEEPA_API_KEY", default=None)
+    keepa_api_key: Optional[str] = config("KEEPA_API_KEY")  # No fallback - must be set
 
 
 settings = Settings()
