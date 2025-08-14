@@ -7,6 +7,7 @@ def parse_env_file():
     """Parse ENV_FILE_DEV environment variable if it exists (for ECS single secret approach)."""
     env_file_content = os.environ.get('ENV_FILE_DEV')
     if env_file_content:
+        print(f"🔍 Found ENV_FILE_DEV: {env_file_content[:100]}...")  # Debug log
         # Parse the ENV_FILE_DEV content (key=value format)
         for line in env_file_content.strip().split('\n'):
             line = line.strip()
@@ -17,10 +18,20 @@ def parse_env_file():
                 # Set the environment variable if it's not already set
                 if key and value and key not in os.environ:
                     os.environ[key] = value
+                    print(f"✅ Set {key}={value[:20]}...")  # Debug log
+                elif key and value:
+                    print(f"⚠️  {key} already set, skipping")  # Debug log
+    else:
+        print("❌ ENV_FILE_DEV not found")  # Debug log
 
 
 # Parse ENV_FILE_DEV at module import time
 parse_env_file()
+
+# Debug: Show what environment variables we have
+print(f"🔍 Environment variables after parsing:")
+print(f"   MONGODB_URL: {os.environ.get('MONGODB_URL', 'NOT SET')}")
+print(f"   JWT_SECRET_KEY: {os.environ.get('JWT_SECRET_KEY', 'NOT SET')[:10] if os.environ.get('JWT_SECRET_KEY') else 'NOT SET'}...")
 
 
 class Settings:
