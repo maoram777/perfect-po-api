@@ -1,5 +1,26 @@
+import os
 from decouple import config
 from typing import Optional
+
+
+def parse_env_file():
+    """Parse ENV_FILE_DEV environment variable if it exists (for ECS single secret approach)."""
+    env_file_content = os.environ.get('ENV_FILE_DEV')
+    if env_file_content:
+        # Parse the ENV_FILE_DEV content (key=value format)
+        for line in env_file_content.strip().split('\n'):
+            line = line.strip()
+            if line and not line.startswith('#') and '=' in line:
+                key, value = line.split('=', 1)
+                key = key.strip()
+                value = value.strip()
+                # Set the environment variable if it's not already set
+                if key and value and key not in os.environ:
+                    os.environ[key] = value
+
+
+# Parse ENV_FILE_DEV at module import time
+parse_env_file()
 
 
 class Settings:
