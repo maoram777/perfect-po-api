@@ -1,0 +1,120 @@
+name: Deploy to AWS ECS
+
+on:
+  push:
+    branches: [ main, develop ]
+  pull_request:
+    branches: [ main ]
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: 'Environment to deploy to'
+        required: true
+        default: 'dev'
+        type: choice
+        options:
+        - dev
+        - staging
+        - prod
+
+env:
+  AWS_REGION: us-east-1
+  ECR_REPOSITORY: perfect-po-api
+  ECS_CLUSTER: perfect-po-cluster
+  ECS_SERVICE: perfect-po-api-service
+  ECS_TASK_DEFINITION: perfect-po-api-task
+
+jobs:
+  build-and-deploy:
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Configure AWS credentials
+      uses: aws-actions/configure-aws-credentials@v4
+      with:
+        aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+        aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+        aws-region: ${{ env.AWS_REGION }}
+
+    - name: Login to Amazon ECR
+      id: login-ecr
+      uses: aws-actions/amazon-ecr-login@v2
+
+    - name: Build, tag, and push image to Amazon ECR
+      id: build-image
+      env:
+        ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+        IMAGE_TAG: ${{ github.sha }}
+      run: |
+        # Build a docker container and push it to ECR
+        docker build -t $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG -f deployment/prod/Dockerfile.prod .
+        docker build -t $ECR_REGISTRY/$ECR_REPOSITORY:latest -f deployment/prod/Dockerfile.prod .
+        
+        echo "Pushing images to ECR..."
+        docker push $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG
+        docker push $ECR_REGISTRY/$ECR_REPOSITORY:latest
+        
+        echo "image=$ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG" >> $GITHUB_OUTPUT
+
+    - name: Fill in the new image ID in the Amazon ECS task definition
+      id: task-def
+      uses: aws-actions/amazon-ecs-render-task-definition@v2
+      with:
+        task-definition: deployment/aws/ecs-task-definition.json
+        container-name: perfect-po-api
+        image: ${{ steps.build-image.outputs.image }}
+
+    - name: Deploy Amazon ECS task definition
+      uses: aws-actions/amazon-ecs-deploy-task-definition@v2
+      with:
+        task-definition: ${{ steps.task-def.outputs.task-definition }}
+        service: ${{ env.ECS_SERVICE }}
+        cluster: ${{ env.ECS_CLUSTER }}
+        wait-for-service-stability: true
+
+    - name: Wait for service to be stable
+      run: |
+        aws ecs wait services-stable \
+          --cluster ${{ env.ECS_CLUSTER }} \
+          --services ${{ env.ECS_SERVICE }} \
+          --region ${{ env.AWS_REGION }}
+
+    - name: Get service URL
+      id: service-url
+      run: |
+        # Get the service URL from ECS
+        SERVICE_URL=$(aws ecs describe-services \
+          --cluster ${{ env.ECS_CLUSTER }} \
+          --services ${{ env.ECS_SERVICE }} \
+          --region ${{ env.AWS_REGION }} \
+          --query 'services[0].loadBalancers[0].dnsName' \
+          --output text)
+        
+        echo "service-url=$SERVICE_URL" >> $GITHUB_OUTPUT
+        echo "Service deployed to: $SERVICE_URL"
+
+    - name: Test deployment
+      run: |
+        # Wait a bit for the service to be fully ready
+        sleep 60
+        
+        # Test the health endpoint
+        SERVICE_URL="${{ steps.service-url.outputs.service-url }}"
+        if [ "$SERVICE_URL" != "None" ] && [ "$SERVICE_URL" != "" ]; then
+          echo "Testing service at: $SERVICE_URL"
+          curl -f "http://$SERVICE_URL/health" || exit 1
+          echo "✅ Service is healthy!"
+        else
+          echo "⚠️  No load balancer URL found, skipping health check"
+        fi
+
+    - name: Deployment Summary
+      run: |
+        echo "🎉 Deployment completed successfully!"
+        echo "📱 Service URL: ${{ steps.service-url.outputs.service-url }}"
+        echo "🐳 Image: ${{ steps.build-image.outputs.image }}"
+        echo "🏗️  Environment: ${{ github.ref_name }}"
+        echo "📝 Commit: ${{ github.sha }}"
