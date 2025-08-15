@@ -5,11 +5,11 @@ from typing import Optional
 
 def parse_env_file():
     """Parse ENV_FILE_DEV environment variable if it exists (for ECS single secret approach)."""
-    env_file_content = os.environ.get('ENV_FILE_DEV')
-    if env_file_content:
-        print(f"🔍 Found ENV_FILE_DEV: {env_file_content[:100]}...")  # Debug log
+    # Only run this in ECS/production environments, not locally
+    if os.environ.get('ENV_FILE_DEV') and not os.path.exists('.env'):
+        print(f"🔍 Found ENV_FILE_DEV: {os.environ.get('ENV_FILE_DEV')[:100]}...")  # Debug log
         # Parse the ENV_FILE_DEV content (key=value format)
-        for line in env_file_content.strip().split('\n'):
+        for line in os.environ.get('ENV_FILE_DEV', '').strip().split('\n'):
             line = line.strip()
             if line and not line.startswith('#') and '=' in line:
                 key, value = line.split('=', 1)
@@ -22,10 +22,13 @@ def parse_env_file():
                 elif key and value:
                     print(f"⚠️  {key} already set, skipping")  # Debug log
     else:
-        print("❌ ENV_FILE_DEV not found")  # Debug log
+        if os.path.exists('.env'):
+            print("📁 Local development: Using .env file")  # Debug log
+        else:
+            print("❌ No ENV_FILE_DEV or .env file found")  # Debug log
 
 
-# Parse ENV_FILE_DEV at module import time
+# Parse ENV_FILE_DEV at module import time (only in ECS)
 parse_env_file()
 
 # Debug: Show what environment variables we have
