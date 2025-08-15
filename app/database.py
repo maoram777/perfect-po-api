@@ -21,7 +21,13 @@ async def connect_to_mongo():
         
         # Extract database name from URL or use default
         if "/" in settings.mongodb_url:
-            db_name = settings.mongodb_url.split("/")[-1]
+            # Split by "/" and get the last part, then remove query parameters
+            db_part = settings.mongodb_url.split("/")[-1]
+            # Remove query parameters (everything after "?")
+            if "?" in db_part:
+                db_name = db_part.split("?")[0]
+            else:
+                db_name = db_part
         else:
             db_name = "perfect_po_db"
         
