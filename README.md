@@ -1,80 +1,91 @@
 # Perfect PO API
 
-A comprehensive API for managing product catalogs, enrichment, and offer generation.
+A comprehensive API for managing product catalogs, pricing optimization, and inventory management.
 
-## 🚀 **Latest Deployment Status**
-- **Infrastructure**: ✅ ECS Service Active
-- **Next**: Trigger deployment with latest fixes
-
-## Features
-
-- **Catalog Management**: Upload and manage product catalogs
-- **Product Enrichment**: Automatically enrich products with external data
-- **Offer Generation**: Generate competitive offers based on enriched data
-- **User Authentication**: Secure JWT-based authentication
-- **File Processing**: Support for CSV, JSON, and Excel files
-
-## Quick Start
-
-1. **Clone the repository**
-   ```bash
-   git clone <your-repo-url>
-   cd perfect-po-api
-   ```
-
-2. **Install dependencies**
-   ```bash
-   pip install -r requirements.txt
-   ```
-
-3. **Set up environment variables**
-   ```bash
-   cp .env.example .env
-   # Edit .env with your configuration
-   ```
-
-4. **Run the development server**
-   ```bash
-   uvicorn app.main:app --reload
-   ```
-
-## API Documentation
-
-- **Swagger UI**: http://localhost:8000/docs
-- **ReDoc**: http://localhost:8000/redoc
-
-## Environment Variables
-
-- `MONGODB_URL` - MongoDB connection string
-- `JWT_SECRET_KEY` - JWT signing secret
-- `AWS_ACCESS_KEY_ID` - AWS access key
-- `AWS_SECRET_ACCESS_KEY` - AWS secret key
-- `KEEPA_API_KEY` - Keepa API key for product enrichment
-
-## Deployment
-
-This project includes automated deployment to AWS ECS via GitHub Actions.
+## 🚀 Quick Start
 
 ### Prerequisites
+- Python 3.8+
+- MongoDB
+- Docker (for containerized deployment)
 
+### Local Development
+```bash
+# Clone the repository
+git clone https://github.com/maoram777/perfect-po-api.git
+cd perfect-po-api
+
+# Install dependencies
+pip install -r requirements.txt
+
+# Set environment variables
+cp .env.example .env
+# Edit .env with your configuration
+
+# Run the application
+uvicorn app.main:app --reload
+```
+
+## 📚 API Documentation
+
+### Health Check
+- **GET** `/health` - API health status
+
+### Authentication
+- **POST** `/auth/login` - User login
+- **POST** `/auth/register` - User registration
+
+### Products
+- **GET** `/products` - List all products
+- **POST** `/products` - Create new product
+- **GET** `/products/{id}` - Get product by ID
+- **PUT** `/products/{id}` - Update product
+- **DELETE** `/products/{id}` - Delete product
+
+### Catalogs
+- **GET** `/catalogs` - List all catalogs
+- **POST** `/catalogs` - Create new catalog
+- **GET** `/catalogs/{id}` - Get catalog by ID
+- **PUT** `/catalogs/{id}` - Update catalog
+- **DELETE** `/catalogs/{id}` - Delete catalog
+
+## 🔧 Environment Variables
+
+| Variable | Description | Required | Default |
+|----------|-------------|----------|---------|
+| `MONGODB_URL` | MongoDB connection string | ✅ | - |
+| `JWT_SECRET_KEY` | JWT signing secret | ✅ | - |
+| `KEEPA_API_KEY` | Keepa API key | ✅ | - |
+| `AWS_ACCESS_KEY_ID` | AWS access key | ✅ | - |
+| `AWS_SECRET_ACCESS_KEY` | AWS secret key | ✅ | - |
+| `AWS_REGION` | AWS region | ❌ | `us-east-1` |
+| `ENVIRONMENT` | Environment name | ❌ | `dev` |
+| `DEBUG` | Debug mode | ❌ | `false` |
+
+## 🚀 Deployment
+
+### AWS ECS Deployment
+
+The application is configured for deployment to AWS ECS using GitHub Actions.
+
+#### Prerequisites
 - AWS account with appropriate permissions
 - GitHub repository secrets configured
-- Docker and Docker Compose (for local development)
+- Infrastructure deployed via CloudFormation
 
-### Deployment Process
+#### Deployment Process
+1. **Infrastructure Setup**: Deploy ECS infrastructure using CloudFormation
+2. **GitHub Secrets**: Configure `ENV_FILE_DEV` secret with environment variables
+3. **Automatic Deployment**: Push to main branch triggers GitHub Actions deployment
+4. **ECS Deployment**: Application deploys to ECS Fargate with load balancer
 
-1. **Push to main branch** triggers automatic deployment
-2. **Builds Docker image** and pushes to ECR
-3. **Deploys to ECS** with latest code
-4. **Health checks** ensure successful deployment
+#### Infrastructure Components
+- **ECS Cluster**: `perfect-po-dev-cluster`
+- **ECS Service**: `perfect-po-dev-api-service`
+- **Load Balancer**: Application Load Balancer with health checks
+- **ECR Repository**: `perfect-po-dev-api`
+- **IAM Roles**: Execution and task roles with appropriate permissions
 
-## Contributing
+## 📝 Development Notes
 
-1. Fork the repository
-2. Create a feature branch
-3. Make your changes
-4. Submit a pull request
-
-## License
-
-This project is licensed under the MIT License.
+- **Triggering Deployment**: This comment triggers a new deployment! 🚀
