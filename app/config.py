@@ -1,6 +1,9 @@
 import os
-from decouple import config
+from dotenv import load_dotenv
 from typing import Optional
+
+# Load environment variables from .env file
+load_dotenv()
 
 
 def parse_env_file():
@@ -39,29 +42,29 @@ print(f"   JWT_SECRET_KEY: {os.environ.get('JWT_SECRET_KEY', 'NOT SET')[:10] if 
 
 class Settings:
     # Database Configuration
-    mongodb_url: str = config("MONGODB_URL")  # No fallback - must be set
+    mongodb_url: str = os.environ.get("MONGODB_URL")  # No fallback - must be set
     
     # AWS Configuration
-    aws_access_key_id: Optional[str] = config("AWS_ACCESS_KEY_ID", default=None)
-    aws_secret_access_key: Optional[str] = config("AWS_SECRET_ACCESS_KEY", default=None)
-    aws_region: str = config("AWS_REGION", default="us-east-1")
-    s3_bucket_name: str = config("S3_BUCKET_NAME", default="perfect-po-catalogs")
-    sqs_queue_url: Optional[str] = config("SQS_QUEUE_URL", default=None)
+    aws_access_key_id: Optional[str] = os.environ.get("AWS_ACCESS_KEY_ID")
+    aws_secret_access_key: Optional[str] = os.environ.get("AWS_SECRET_ACCESS_KEY")
+    aws_region: str = os.environ.get("AWS_REGION", "us-east-1")
+    s3_bucket_name: str = os.environ.get("S3_BUCKET_NAME", "perfect-po-catalogs")
+    sqs_queue_url: Optional[str] = os.environ.get("SQS_QUEUE_URL")
     
     # JWT Configuration
-    jwt_secret_key: str = config("JWT_SECRET_KEY")  # No fallback - must be set
-    jwt_algorithm: str = config("JWT_ALGORITHM", default="HS256")
-    jwt_expiration_minutes: int = config("JWT_EXPIRATION_MINUTES", default=10080, cast=int)  # 1 week (7 days * 24 hours * 60 minutes)
+    jwt_secret_key: str = os.environ.get("JWT_SECRET_KEY")  # No fallback - must be set
+    jwt_algorithm: str = os.environ.get("JWT_ALGORITHM", "HS256")
+    jwt_expiration_minutes: int = int(os.environ.get("JWT_EXPIRATION_MINUTES", "10080"))  # 1 week (7 days * 24 hours * 60 minutes)
     
     # API Configuration
-    api_host: str = config("API_HOST", default="0.0.0.0")
-    api_port: int = config("API_PORT", default=8000, cast=int)
-    debug: bool = config("DEBUG", default=True, cast=bool)
+    api_host: str = os.environ.get("API_HOST", "0.0.0.0")
+    api_port: int = int(os.environ.get("API_PORT", "8000"))
+    debug: bool = os.environ.get("DEBUG", "True").lower() == "true"
     
     # External APIs
-    amazon_api_key: Optional[str] = config("AMAZON_API_KEY", default=None)
-    amazon_api_secret: Optional[str] = config("AMAZON_API_SECRET", default=None)
-    keepa_api_key: Optional[str] = config("KEEPA_API_KEY")  # No fallback - must be set
+    amazon_api_key: Optional[str] = os.environ.get("AMAZON_API_KEY")
+    amazon_api_secret: Optional[str] = os.environ.get("AMAZON_API_SECRET")
+    keepa_api_key: Optional[str] = os.environ.get("KEEPA_API_KEY")  # No fallback - must be set
 
 
 settings = Settings()
