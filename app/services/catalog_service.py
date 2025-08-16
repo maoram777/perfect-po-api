@@ -55,11 +55,19 @@ class CatalogService:
                 file_data, file_name, user_id, str(result.inserted_id)
             )
             
+            logger.info(f"Uploaded file to S3: {file_path}")
+            
             # Update catalog with S3 file path
-            await self.db.catalogs.update_one(
+            update_result = await self.db.catalogs.update_one(
                 {"_id": result.inserted_id},
                 {"$set": {"file_path": file_path}}
             )
+            
+            logger.info(f"Updated catalog with file_path: {update_result.modified_count} documents modified")
+            
+            # Verify the update
+            verify_catalog = await self.db.catalogs.find_one({"_id": result.inserted_id})
+            logger.info(f"Verification - file_path in DB: {verify_catalog.get('file_path') if verify_catalog else 'NOT FOUND'}")
             
             # Process file to count line items
             line_items = await self._parse_catalog_file(file_data, file_name)
@@ -94,6 +102,9 @@ class CatalogService:
             cursor = self.db.catalogs.find(filter_query).skip(skip).limit(limit)
             catalogs = []
             async for catalog in cursor:
+                logger.info(f"Raw catalog from DB: {catalog}")
+                logger.info(f"file_path present: {'file_path' in catalog}")
+                logger.info(f"file_path value: {catalog.get('file_path')}")
                 catalogs.append(Catalog(**catalog))
             return catalogs
         except Exception as e:
