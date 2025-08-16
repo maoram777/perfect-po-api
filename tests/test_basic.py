@@ -50,3 +50,4 @@ def test_catalog_endpoints_exist():
     assert "/catalogs/upload" in docs_content
     assert "/catalogs/" in docs_content
 
+

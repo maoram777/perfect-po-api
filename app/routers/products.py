@@ -185,3 +185,4 @@ async def get_catalog_products_summary(
             detail="Failed to get catalog products summary"
         )
 
+
