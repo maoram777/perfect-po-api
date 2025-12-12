@@ -1,0 +1,46 @@
+{
+  "SourceConfiguration": {
+    "ImageRepository": {
+      "ImageIdentifier": "YOUR_ACCOUNT_ID.dkr.ecr.us-east-1.amazonaws.com/perfect-po-api:latest",
+      "ImageConfiguration": {
+        "Port": "8000",
+        "RuntimeEnvironmentVariables": {
+          "MONGODB_URL": "mongodb+srv://USER:PASSWORD@cluster.mongodb.net/?retryWrites=true&w=majority&appName=AppName",
+          "MONGODB_DATABASE_NAME": "DATABASE_NAME",
+          "AWS_ACCESS_KEY_ID": "YOUR_AWS_ACCESS_KEY_ID",
+          "AWS_SECRET_ACCESS_KEY": "YOUR_AWS_SECRET_ACCESS_KEY",
+          "AWS_REGION": "us-east-1",
+          "S3_BUCKET_NAME": "your-bucket-name",
+          "JWT_SECRET_KEY": "your-jwt-secret-key",
+          "JWT_ALGORITHM": "HS256",
+          "JWT_EXPIRATION_MINUTES": "10080",
+          "API_HOST": "0.0.0.0",
+          "API_PORT": "8000",
+          "DEBUG": "false",
+          "ENVIRONMENT": "production",
+          "AMAZON_API_KEY": "your-amazon-api-key",
+          "AMAZON_API_SECRET": "your-amazon-api-secret",
+          "KEEPA_API_KEY": "your-keepa-api-key"
+        }
+      },
+      "ImageRepositoryType": "ECR"
+    },
+    "AutoDeploymentsEnabled": false,
+    "AuthenticationConfiguration": {
+      "AccessRoleArn": "arn:aws:iam::YOUR_ACCOUNT_ID:role/AppRunnerECRAccessRole"
+    }
+  },
+  "InstanceConfiguration": {
+    "Cpu": "1 vCPU",
+    "Memory": "2 GB",
+    "InstanceRoleArn": "arn:aws:iam::YOUR_ACCOUNT_ID:role/AppRunnerInstanceRole"
+  },
+  "HealthCheckConfiguration": {
+    "Protocol": "HTTP",
+    "Path": "/health",
+    "Interval": 10,
+    "Timeout": 5,
+    "HealthyThreshold": 1,
+    "UnhealthyThreshold": 5
+  }
+}
