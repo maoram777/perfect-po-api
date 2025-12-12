@@ -14,24 +14,42 @@ class OfferRule(BaseModel):
     is_active: bool = True
 
 
+class ProductInfo(BaseModel):
+    """Product information embedded in offer item."""
+    id: str
+    brand: Optional[str] = None
+    name: Optional[str] = None
+    description: Optional[str] = None
+    color: Optional[str] = None
+    size: Optional[str] = None
+    image: Optional[str] = None
+
+
 class OfferItem(BaseModel):
     product_id: PyObjectId
+    product: ProductInfo  # Embedded product information
     original_price: float
     offer_price: float
     discount_percentage: float
     quantity_required: Optional[int] = None
     max_quantity: Optional[int] = None
     notes: Optional[str] = None
+    upc: Optional[str] = None
+    sku: Optional[str] = None
 
 
 class OfferItemResponse(BaseModel):
-    product_id: str  # Convert PyObjectId to string for API responses
+    """Response model for offer items - matches OfferItem structure."""
+    product_id: str
+    product: ProductInfo  # Product details nested in product object
     original_price: float
     offer_price: float
     discount_percentage: float
     quantity_required: Optional[int] = None
     max_quantity: Optional[int] = None
     notes: Optional[str] = None
+    upc: Optional[str] = None
+    sku: Optional[str] = None
 
 
 class OfferBase(BaseModel):

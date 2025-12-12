@@ -1,5 +1,6 @@
 from fastapi import APIRouter, Depends, HTTPException, status, Query
-from typing import List, Optional
+from typing import List, Optional, Dict, Any
+from pydantic import BaseModel, Field
 from ..auth.dependencies import get_current_active_user
 from ..models.user import User
 from ..models.offer import OfferResponse, OfferUpdate
@@ -9,6 +10,200 @@ import logging
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/offers", tags=["offers"])
+
+
+async def _convert_offer_items_to_response(items: List) -> List[Dict[str, Any]]:
+    """Convert OfferItem list to OfferItemResponse list.
+    
+    Product information is already embedded in OfferItem, so no database queries needed.
+    This provides optimal performance - single query to get offer, no additional product fetches.
+    """
+    items_response = []
+    for item in items:
+        # Product info is already embedded in the offer item
+        item_response = {
+            "product_id": str(item.product_id),
+            "product": {
+                "id": item.product.id,
+                "brand": item.product.brand,
+                "name": item.product.name,
+                "description": item.product.description,
+                "color": item.product.color,
+                "size": item.product.size,
+                "image": item.product.image
+            },
+            "original_price": item.original_price,
+            "offer_price": item.offer_price,
+            "discount_percentage": item.discount_percentage,
+            "quantity_required": item.quantity_required,
+            "max_quantity": item.max_quantity,
+            "notes": item.notes,
+            "upc": item.upc,
+            "sku": item.sku
+        }
+        items_response.append(item_response)
+    return items_response
+
+
+class OptimalOfferRequest(BaseModel):
+    catalog_id: str
+    investment: float = Field(..., gt=0, description="Total investment amount")
+    grace_percent: float = Field(5.0, ge=0, le=20, description="Allowed deviation from investment (default 5%)")
+    max_products_per_category: Optional[int] = Field(None, ge=1, description="Maximum products per category for variety")
+    min_po_score: Optional[float] = Field(None, ge=0, le=100, description="Minimum PO score threshold")
+
+
+class CreateOfferRequest(BaseModel):
+    """Request model for creating a new offer using optimal generation."""
+    catalog_id: str
+    investment: float = Field(..., gt=0, description="Total investment amount")
+    grace_percent: float = Field(5.0, ge=0, le=20, description="Allowed deviation from investment (default 5%)")
+    max_products_per_category: Optional[int] = Field(None, ge=1, description="Maximum products per category for variety")
+    min_po_score: Optional[float] = Field(None, ge=0, le=100, description="Minimum PO score threshold")
+
+
+@router.post("/", response_model=dict)
+async def create_offer(
+    request: CreateOfferRequest,
+    current_user: User = Depends(get_current_active_user)
+):
+    """Create a new offer using optimal generation algorithm.
+    
+    This is the main endpoint for creating offers. It uses the optimal offer generation
+    algorithm that:
+    - Only includes products with msrp_validated=True and po_score
+    - Considers product variety to reduce risk
+    - Matches investment amount within grace_percent tolerance
+    - Optimizes for best po_score values
+    - Respects available inventory
+    
+    This endpoint replaces the need to call /offers/optimal directly.
+    """
+    try:
+        offer, metadata = await offer_service.generate_optimal_offer(
+            catalog_id=request.catalog_id,
+            user_id=str(current_user.id),
+            investment=request.investment,
+            grace_percent=request.grace_percent,
+            max_products_per_category=request.max_products_per_category,
+            min_po_score=request.min_po_score
+        )
+        
+        # Convert OfferItem to OfferItemResponse
+        items_response = []
+        for item in offer.items:
+            item_response = {
+                "product_id": str(item.product_id),
+                "original_price": item.original_price,
+                "offer_price": item.offer_price,
+                "discount_percentage": item.discount_percentage,
+                "quantity_required": item.quantity_required,
+                "max_quantity": item.max_quantity,
+                "notes": item.notes
+            }
+            items_response.append(item_response)
+        
+        offer_response = OfferResponse(
+            id=str(offer.id),
+            catalog_id=str(offer.catalog_id),
+            name=offer.name,
+            description=offer.description,
+            offer_type=offer.offer_type,
+            valid_from=offer.valid_from,
+            valid_until=offer.valid_until,
+            is_active=offer.is_active,
+            items=items_response,
+            rules=offer.rules,
+            total_discount=offer.total_discount,
+            total_savings=offer.total_savings,
+            offer_score=offer.offer_score,
+            generation_method=offer.generation_method,
+            created_at=offer.created_at,
+            updated_at=offer.updated_at
+        )
+        
+        return {
+            "message": "Offer created successfully",
+            "offer": offer_response,
+            "metadata": metadata
+        }
+        
+    except ValueError as e:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(e)
+        )
+    except Exception as e:
+        logger.error(f"Error creating offer: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to create offer: {str(e)}"
+        )
+
+
+@router.post("/optimal")
+async def create_optimal_offer(
+    request: OptimalOfferRequest,
+    current_user: User = Depends(get_current_active_user)
+):
+    """Create an optimal offer based on investment amount.
+    
+    This endpoint generates an optimal offer that:
+    - Only includes products with msrp_validated=True and po_score
+    - Considers product variety to reduce risk
+    - Matches investment amount within grace_percent tolerance
+    - Optimizes for best po_score values
+    - Respects available inventory
+    """
+    try:
+        offer, metadata = await offer_service.generate_optimal_offer(
+            catalog_id=request.catalog_id,
+            user_id=str(current_user.id),
+            investment=request.investment,
+            grace_percent=request.grace_percent,
+            max_products_per_category=request.max_products_per_category,
+            min_po_score=request.min_po_score
+        )
+        
+        # Convert OfferItem to OfferItemResponse (product details already embedded)
+        items_response = await _convert_offer_items_to_response(offer.items)
+        
+        offer_response = OfferResponse(
+            id=str(offer.id),
+            catalog_id=str(offer.catalog_id),
+            name=offer.name,
+            description=offer.description,
+            offer_type=offer.offer_type,
+            valid_from=offer.valid_from,
+            valid_until=offer.valid_until,
+            is_active=offer.is_active,
+            items=items_response,
+            rules=offer.rules,
+            total_discount=offer.total_discount,
+            total_savings=offer.total_savings,
+            offer_score=offer.offer_score,
+            generation_method=offer.generation_method,
+            created_at=offer.created_at,
+            updated_at=offer.updated_at
+        )
+        
+        return {
+            "message": "Optimal offer created successfully",
+            "offer": offer_response,
+            "metadata": metadata
+        }
+        
+    except ValueError as e:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(e)
+        )
+    except Exception as e:
+        logger.error(f"Error creating optimal offer: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to create optimal offer: {str(e)}"
+        )
 
 
 @router.post("/generate")
@@ -30,19 +225,8 @@ async def generate_offers(
         # Convert to response models
         offer_responses = []
         for offer in offers:
-            # Convert OfferItem to OfferItemResponse
-            items_response = []
-            for item in offer.items:
-                item_response = {
-                    "product_id": str(item.product_id),  # Convert PyObjectId to string
-                    "original_price": item.original_price,
-                    "offer_price": item.offer_price,
-                    "discount_percentage": item.discount_percentage,
-                    "quantity_required": item.quantity_required,
-                    "max_quantity": item.max_quantity,
-                    "notes": item.notes
-                }
-                items_response.append(item_response)
+            # Convert OfferItem to OfferItemResponse with product details
+            items_response = await _convert_offer_items_to_response(offer.items)
             
             offer_response = OfferResponse(
                 id=str(offer.id),
@@ -105,19 +289,8 @@ async def get_offers(
         # Convert to response models
         offer_responses = []
         for offer in offers:
-            # Convert OfferItem to OfferItemResponse
-            items_response = []
-            for item in offer.items:
-                item_response = {
-                    "product_id": str(item.product_id),  # Convert PyObjectId to string
-                    "original_price": item.original_price,
-                    "offer_price": item.offer_price,
-                    "discount_percentage": item.discount_percentage,
-                    "quantity_required": item.quantity_required,
-                    "max_quantity": item.max_quantity,
-                    "notes": item.notes
-                }
-                items_response.append(item_response)
+            # Convert OfferItem to OfferItemResponse with product details
+            items_response = await _convert_offer_items_to_response(offer.items)
             
             offer_response = OfferResponse(
                 id=str(offer.id),
@@ -164,19 +337,8 @@ async def get_offer(
                 detail="Offer not found"
             )
         
-        # Convert OfferItem to OfferItemResponse
-        items_response = []
-        for item in offer.items:
-            item_response = {
-                "product_id": str(item.product_id),  # Convert PyObjectId to string
-                "original_price": item.original_price,
-                "offer_price": item.offer_price,
-                "discount_percentage": item.discount_percentage,
-                "quantity_required": item.quantity_required,
-                "max_quantity": item.max_quantity,
-                "notes": item.notes
-            }
-            items_response.append(item_response)
+        # Convert OfferItem to OfferItemResponse (product details already embedded)
+        items_response = await _convert_offer_items_to_response(offer.items)
         
         offer_response = OfferResponse(
             id=str(offer.id),
@@ -227,19 +389,9 @@ async def update_offer(
                 detail="Offer not found"
             )
         
-        # Convert OfferItem to OfferItemResponse
-        items_response = []
-        for item in updated_offer.items:
-            item_response = {
-                "product_id": str(item.product_id),  # Convert PyObjectId to string
-                "original_price": item.original_price,
-                "offer_price": item.offer_price,
-                "discount_percentage": item.discount_percentage,
-                "quantity_required": item.quantity_required,
-                "max_quantity": item.max_quantity,
-                "notes": item.notes
-            }
-            items_response.append(item_response)
+        # Convert OfferItem to OfferItemResponse with product details
+        db = get_database()
+        items_response = await _convert_offer_items_to_response(updated_offer.items, db)
         
         offer_response = OfferResponse(
             id=str(updated_offer.id),

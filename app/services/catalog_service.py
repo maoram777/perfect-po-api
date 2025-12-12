@@ -102,9 +102,9 @@ class CatalogService:
             cursor = self.db.catalogs.find(filter_query).skip(skip).limit(limit)
             catalogs = []
             async for catalog in cursor:
-                logger.info(f"Raw catalog from DB: {catalog}")
-                logger.info(f"file_path present: {'file_path' in catalog}")
-                logger.info(f"file_path value: {catalog.get('file_path')}")
+                # logger.info(f"Raw catalog from DB: {catalog}")
+                # logger.info(f"file_path present: {'file_path' in catalog}")
+                # logger.info(f"file_path value: {catalog.get('file_path')}")
                 catalogs.append(Catalog(**catalog))
             return catalogs
         except Exception as e:

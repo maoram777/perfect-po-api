@@ -21,6 +21,8 @@ class ProductBase(BaseModel):
     # Image fields for enriched products
     main_image: Optional[str] = None  # Primary product image URL
     images: Optional[List[str]] = None  # Additional product images
+    color: Optional[str] = None  # Product color (single color, not array)
+    size: Optional[str] = None  # Product size - can be number (e.g., "8.5" for shoes) or dimensions (e.g., "M" or "10x12" for clothing)
 
 
 class ProductCreate(ProductBase):
@@ -35,6 +37,8 @@ class Product(ProductBase):
     enrichment_source: Optional[str] = None  # e.g., "amazon_api"
     enrichment_status: str = "pending"  # pending, processing, completed, failed
     enrichment_errors: List[str] = []
+    po_score: Optional[float] = None  # Purchase Order score - represents opportunity/deal quality (calculated later)
+    msrp_validated: Optional[bool] = None  # True if source MSRP is within 5% delta of enriched price from external API
     created_at: datetime = Field(default_factory=datetime.utcnow)
     updated_at: datetime = Field(default_factory=datetime.utcnow)
     enriched_at: Optional[datetime] = None
@@ -73,7 +77,12 @@ class ProductResponse(BaseModel):
     unit: Optional[str]
     main_image: Optional[str]  # Primary product image URL
     images: Optional[List[str]]  # Additional product images
+    color: Optional[str]  # Product color (single color)
+    size: Optional[str]  # Product size
     enrichment_status: str
+    po_score: Optional[float]  # Purchase Order score
+    msrp: Optional[float] = None  # MSRP value from original data
+    msrp_validated: Optional[bool]  # MSRP validation status
     enriched_at: Optional[datetime]
     created_at: datetime
     updated_at: datetime
@@ -95,4 +104,8 @@ class ProductUpdate(BaseModel):
     unit: Optional[str] = None
     main_image: Optional[str] = None  # Primary product image URL
     images: Optional[List[str]] = None  # Additional product images
+    color: Optional[str] = None  # Product color (single color)
+    size: Optional[str] = None  # Product size
+    po_score: Optional[float] = None  # Purchase Order score
+    msrp_validated: Optional[bool] = None  # MSRP validation status
 

@@ -322,7 +322,7 @@ async def get_catalog_summary(
 @router.post("/{catalog_id}/enrich")
 async def trigger_enrichment(
     catalog_id: str,
-    provider: str = "amazon",  # Default to Amazon API
+    provider: str = "keepa",  # Default to Amazon API
     current_user: User = Depends(get_current_active_user)
 ):
     """Trigger enrichment for a specific catalog."""

@@ -1,0 +1,125 @@
+name: Deploy to AWS App Runner
+
+on:
+  push:
+    branches: [ main, develop ]
+  workflow_dispatch:
+
+env:
+  AWS_REGION: us-east-1
+  ECR_REPOSITORY: perfect-po-api
+  SERVICE_NAME: perfect-po-api
+
+jobs:
+  deploy:
+    name: Deploy
+    runs-on: ubuntu-latest
+    environment: production
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Login to Amazon ECR
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Build and push image to ECR
+        id: build-image
+        env:
+          ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+          IMAGE_TAG: ${{ github.sha }}
+        run: |
+          set -e
+          echo "🔨 Building Docker image (no cache)..."
+          docker build --no-cache -t $ECR_REGISTRY/${{ env.ECR_REPOSITORY }}:$IMAGE_TAG -t $ECR_REGISTRY/${{ env.ECR_REPOSITORY }}:latest .
+
+          echo "🔖 Pushing image to ECR..."
+          docker push $ECR_REGISTRY/${{ env.ECR_REPOSITORY }}:$IMAGE_TAG
+          docker push $ECR_REGISTRY/${{ env.ECR_REPOSITORY }}:latest
+
+          echo "image=$ECR_REGISTRY/${{ env.ECR_REPOSITORY }}:$IMAGE_TAG" >> $GITHUB_OUTPUT
+
+      - name: Prepare App Runner config (update)
+        id: apprunner-config
+        env:
+          IMAGE_ID: ${{ steps.build-image.outputs.image }}
+        run: |
+          set -e
+          # Create a temp update config that points to the freshly pushed image
+          jq --arg IMAGE_ID "$IMAGE_ID" \
+             '.SourceConfiguration.ImageRepository.ImageIdentifier = $IMAGE_ID' \
+             apprunner-update-config.json > /tmp/apprunner-update.json
+
+      - name: Update or create App Runner service
+        env:
+          IMAGE_ID: ${{ steps.build-image.outputs.image }}
+        run: |
+          set -e
+          SERVICE_ARN=$(aws apprunner list-services --query "ServiceSummaryList[?ServiceName=='${{ env.SERVICE_NAME }}'].ServiceArn" --output text)
+
+          if [ -n "$SERVICE_ARN" ]; then
+            echo "⚠️  Service exists, updating..."
+            aws apprunner update-service \
+              --service-arn "$SERVICE_ARN" \
+              --cli-input-json file:///tmp/apprunner-update.json
+            echo "✅ Service update initiated"
+          else
+            echo "🆕 Service not found, creating new service..."
+            jq --arg IMAGE_ID "$IMAGE_ID" \
+               '.SourceConfiguration.ImageRepository.ImageIdentifier = $IMAGE_ID' \
+               apprunner-config.json > /tmp/apprunner-create.json
+
+            aws apprunner create-service \
+              --cli-input-json file:///tmp/apprunner-create.json
+            echo "✅ Service creation initiated"
+          fi
+
+      - name: Wait for service to be running
+        id: wait-for-service
+        run: |
+          set -e
+          SERVICE_ARN=$(aws apprunner list-services --query "ServiceSummaryList[?ServiceName=='${{ env.SERVICE_NAME }}'].ServiceArn" --output text)
+          if [ -z "$SERVICE_ARN" ]; then
+            echo "❌ Could not find service ARN after update/create."
+            exit 1
+          fi
+
+          MAX_ATTEMPTS=60
+          ATTEMPT=0
+          while [ $ATTEMPT -lt $MAX_ATTEMPTS ]; do
+            STATUS=$(aws apprunner describe-service --service-arn "$SERVICE_ARN" --query "Service.Status" --output text)
+            if [ "$STATUS" == "RUNNING" ]; then
+              echo "✅ Service is RUNNING"
+              break
+            elif [ "$STATUS" == "CREATE_FAILED" ] || [ "$STATUS" == "UPDATE_FAILED" ]; then
+              echo "❌ Service failed with status: $STATUS"
+              exit 1
+            fi
+            echo "⏳ Status: $STATUS (attempt $((ATTEMPT+1))/$MAX_ATTEMPTS)"
+            sleep 10
+            ATTEMPT=$((ATTEMPT+1))
+          done
+
+          if [ $ATTEMPT -eq $MAX_ATTEMPTS ]; then
+            echo "⏰ Timeout waiting for service to be ready."
+            exit 1
+          fi
+
+          SERVICE_URL=$(aws apprunner describe-service --service-arn "$SERVICE_ARN" --query "Service.ServiceUrl" --output text)
+          echo "service-url=$SERVICE_URL" >> $GITHUB_OUTPUT
+          echo "📍 Service URL: $SERVICE_URL"
+
+      - name: Summary
+        run: |
+          echo "🎉 Deployment to App Runner completed"
+          echo "📍 Service: ${{ env.SERVICE_NAME }}"
+          echo "🌐 URL: ${{ steps.wait-for-service.outputs.service-url }}"
+          echo "🐳 Image: ${{ steps.build-image.outputs.image }}"

@@ -21,7 +21,7 @@ logging.basicConfig(
 app = FastAPI(
     title="Perfect PO API",
     description="Catalog Management System with Enrichment and Offer Generation",
-    version="1.0.0",
+    version="1.1.0",
     docs_url="/docs",
     redoc_url="/redoc"
 )
@@ -74,7 +74,7 @@ async def root():
     """Root endpoint."""
     return {
         "message": "Perfect PO API - Catalog Management System",
-        "version": "1.0.0",
+        "version": "1.1.0",
         "docs": "/docs"
     }
 

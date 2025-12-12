@@ -70,3 +70,6 @@ class CatalogUpdate(BaseModel):
     category: Optional[str] = Field(None, max_length=100)
 
 
+
+
+

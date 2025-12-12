@@ -43,6 +43,7 @@ print(f"   JWT_SECRET_KEY: {os.environ.get('JWT_SECRET_KEY', 'NOT SET')[:10] if 
 class Settings:
     # Database Configuration
     mongodb_url: str = os.environ.get("MONGODB_URL")  # No fallback - must be set
+    mongodb_database_name: str = os.environ.get("MONGODB_DATABASE_NAME", "AllShoes-Dev")  # Database name, defaults to AllShoes-Dev
     
     # AWS Configuration
     aws_access_key_id: Optional[str] = os.environ.get("AWS_ACCESS_KEY_ID")
@@ -66,5 +67,19 @@ class Settings:
     amazon_api_secret: Optional[str] = os.environ.get("AMAZON_API_SECRET")
     keepa_api_key: Optional[str] = os.environ.get("KEEPA_API_KEY")  # No fallback - must be set
 
+
+# Validate required environment variables before creating settings instance
+missing_vars = []
+if not os.environ.get("MONGODB_URL"):
+    missing_vars.append("MONGODB_URL")
+if not os.environ.get("JWT_SECRET_KEY"):
+    missing_vars.append("JWT_SECRET_KEY")
+if not os.environ.get("KEEPA_API_KEY"):
+    missing_vars.append("KEEPA_API_KEY")
+
+if missing_vars:
+    error_msg = f"❌ Missing required environment variables: {', '.join(missing_vars)}"
+    print(error_msg)
+    raise ValueError(error_msg)
 
 settings = Settings()

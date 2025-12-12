@@ -19,18 +19,32 @@ async def connect_to_mongo():
         await Database.client.admin.command('ping')
         logger.info("MongoDB connection test successful")
         
-        # Extract database name from URL or use default
-        if "/" in settings.mongodb_url:
-            # Split by "/" and get the last part, then remove query parameters
-            db_part = settings.mongodb_url.split("/")[-1]
-            # Remove query parameters (everything after "?")
-            if "?" in db_part:
-                db_name = db_part.split("?")[0]
-            else:
-                db_name = db_part
-        else:
-            db_name = "perfect_po_db"
+        # Extract database name from URL or use configured default
+        # Parse MongoDB connection string properly
+        from urllib.parse import urlparse, parse_qs
         
+        parsed_url = urlparse(settings.mongodb_url)
+        
+        # Get database name from path (remove leading slash)
+        db_name = parsed_url.path.lstrip('/')
+        
+        # If no database name in path, check if it's in the query string or use configured default
+        if not db_name or db_name == '':
+            # Check query parameters for database name
+            query_params = parse_qs(parsed_url.query)
+            if 'database' in query_params:
+                db_name = query_params['database'][0]
+            elif 'db' in query_params:
+                db_name = query_params['db'][0]
+            else:
+                # Use configured database name from settings (defaults to AllShoes-Dev)
+                db_name = settings.mongodb_database_name
+        
+        # Remove any query parameters that might be in the db_name
+        if '?' in db_name:
+            db_name = db_name.split('?')[0]
+        
+        logger.info(f"Using MongoDB database: {db_name}")
         Database.db = Database.client[db_name]
         logger.info(f"Connected to MongoDB database: {Database.db.name}")
         
