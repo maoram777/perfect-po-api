@@ -5,6 +5,14 @@ from bson import ObjectId
 from .user import PyObjectId
 
 
+class Enrichment(BaseModel):
+    """Enrichment information nested in product."""
+    source: Optional[str] = None  # e.g., "amazon_api", "keepa_api"
+    status: str = "pending"  # pending, processing, completed, failed
+    errors: List[str] = []  # List of enrichment errors
+    data: Dict[str, Any] = {}  # Data from external APIs
+
+
 class ProductBase(BaseModel):
     catalog_id: PyObjectId
     line_item_id: str  # Original line item identifier
@@ -12,11 +20,12 @@ class ProductBase(BaseModel):
     description: Optional[str] = None
     category: Optional[str] = None
     brand: Optional[str] = None
-    sku: Optional[str] = None
-    upc: Optional[str] = None
+    sku: Optional[str] = None  # Required field from CSV, saved at product level
+    upc: Optional[str] = None  # Required field from CSV, saved at product level
     price: Optional[float] = None
     currency: str = "USD"
-    quantity: Optional[int] = None
+    quantity: Optional[int] = None  # Required field from CSV, saved at product level
+    offer_price: Optional[float] = None  # Required field from CSV, saved at product level
     unit: Optional[str] = None
     # Image fields for enriched products
     main_image: Optional[str] = None  # Primary product image URL
@@ -32,13 +41,10 @@ class ProductCreate(ProductBase):
 class Product(ProductBase):
     id: PyObjectId = Field(default_factory=PyObjectId, alias="_id")
     user_id: PyObjectId
-    original_data: Dict[str, Any] = {}  # Raw catalog data
-    enriched_data: Dict[str, Any] = {}  # Data from external APIs
-    enrichment_source: Optional[str] = None  # e.g., "amazon_api"
-    enrichment_status: str = "pending"  # pending, processing, completed, failed
-    enrichment_errors: List[str] = []
+    raw_data: Dict[str, Any] = {}  # Raw catalog data
+    enrichment: Enrichment = Field(default_factory=lambda: Enrichment())  # Enrichment information
     po_score: Optional[float] = None  # Purchase Order score - represents opportunity/deal quality (calculated later)
-    msrp_validated: Optional[bool] = None  # True if source MSRP is within 5% delta of enriched price from external API
+    profit: Optional[float] = None  # Profit percentage = (product_price - cogs - offer_price) / product_price (where cogs = product_price * 35%)
     created_at: datetime = Field(default_factory=datetime.utcnow)
     updated_at: datetime = Field(default_factory=datetime.utcnow)
     enriched_at: Optional[datetime] = None
@@ -56,7 +62,12 @@ class Product(ProductBase):
                 "sku": "ATH-BT001",
                 "price": 99.99,
                 "currency": "USD",
-                "enrichment_status": "completed"
+                "enrichment": {
+                    "status": "completed",
+                    "source": "keepa_api",
+                    "errors": [],
+                    "data": {}
+                }
             }
         }
 
@@ -69,20 +80,21 @@ class ProductResponse(BaseModel):
     description: Optional[str]
     category: Optional[str]
     brand: Optional[str]
-    sku: Optional[str]
-    upc: Optional[str]
+    sku: Optional[str]  # Required field from CSV
+    upc: Optional[str]  # Required field from CSV
     price: Optional[float]
     currency: str
-    quantity: Optional[int]
+    quantity: Optional[int]  # Required field from CSV
+    offer_price: Optional[float] = None  # Required field from CSV
     unit: Optional[str]
     main_image: Optional[str]  # Primary product image URL
     images: Optional[List[str]]  # Additional product images
     color: Optional[str]  # Product color (single color)
     size: Optional[str]  # Product size
-    enrichment_status: str
+    enrichment: Enrichment  # Enrichment information
     po_score: Optional[float]  # Purchase Order score
-    msrp: Optional[float] = None  # MSRP value from original data
-    msrp_validated: Optional[bool]  # MSRP validation status
+    msrp: Optional[float] = None  # MSRP value from raw_data
+    profit: Optional[float] = None  # Profit percentage = (product_price - cogs - offer_price) / product_price (where cogs = product_price * 35%)
     enriched_at: Optional[datetime]
     created_at: datetime
     updated_at: datetime
@@ -101,11 +113,12 @@ class ProductUpdate(BaseModel):
     price: Optional[float] = None
     currency: Optional[str] = None
     quantity: Optional[int] = None
+    offer_price: Optional[float] = None
     unit: Optional[str] = None
     main_image: Optional[str] = None  # Primary product image URL
     images: Optional[List[str]] = None  # Additional product images
     color: Optional[str] = None  # Product color (single color)
     size: Optional[str] = None  # Product size
     po_score: Optional[float] = None  # Purchase Order score
-    msrp_validated: Optional[bool] = None  # MSRP validation status
+    profit: Optional[float] = None  # Profit percentage = (product_price - cogs - offer_price) / product_price (where cogs = product_price * 35%)
 

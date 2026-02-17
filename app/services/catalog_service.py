@@ -197,7 +197,44 @@ class CatalogService:
         try:
             text = file_data.decode('utf-8')
             csv_reader = csv.DictReader(io.StringIO(text))
+            
+            # Get headers (fieldnames) from the CSV reader
+            headers = csv_reader.fieldnames
+            if headers is None:
+                raise ValueError("CSV file has no headers")
+            
+            # Normalize headers to lowercase for comparison
+            headers_lower = [h.lower().strip() if h else "" for h in headers]
+            
+            # Required headers (case-insensitive)
+            required_headers = ['sku', 'upc', 'quantity', 'offer_price']
+            missing_headers = []
+            
+            for req_header in required_headers:
+                # Check if header exists (case-insensitive)
+                found = False
+                req_lower = req_header.lower()
+                
+                # Check exact match or underscore/space variations
+                for header in headers_lower:
+                    # Normalize header by removing spaces and underscores
+                    normalized_header = header.replace(' ', '').replace('_', '').lower()
+                    normalized_req = req_lower.replace('_', '').replace(' ', '')
+                    
+                    if normalized_header == normalized_req or header == req_lower:
+                        found = True
+                        break
+                
+                if not found:
+                    missing_headers.append(req_header)
+            
+            if missing_headers:
+                raise ValueError(f"Missing required CSV headers: {', '.join(missing_headers)}")
+            
             return [dict(row) for row in csv_reader]
+        except ValueError as e:
+            logger.error(f"CSV validation error: {e}")
+            raise
         except Exception as e:
             logger.error(f"Error parsing CSV file: {e}")
             raise Exception(f"Failed to parse CSV file: {e}")
@@ -230,6 +267,26 @@ class CatalogService:
             # Try to read the first sheet
             df = pd.read_excel(excel_data, sheet_name=0)
             
+            # Get headers (column names)
+            headers = [str(col).lower().strip() if col else "" for col in df.columns]
+            
+            # Required headers (case-insensitive)
+            required_headers = ['sku', 'upc', 'quantity', 'offer_price']
+            missing_headers = []
+            
+            for req_header in required_headers:
+                # Check if header exists (case-insensitive)
+                if req_header.lower() not in headers:
+                    # Also check for variations like "Offer Price" (with space)
+                    if req_header == 'offer_price':
+                        if 'offer price' not in headers and 'offer' not in headers:
+                            missing_headers.append(req_header)
+                    else:
+                        missing_headers.append(req_header)
+            
+            if missing_headers:
+                raise ValueError(f"Missing required Excel headers: {', '.join(missing_headers)}")
+            
             # Convert DataFrame to list of dictionaries
             line_items = []
             for _, row in df.iterrows():
@@ -249,6 +306,9 @@ class CatalogService:
             logger.info(f"Successfully parsed Excel file with {len(line_items)} items")
             return line_items
             
+        except ValueError as e:
+            logger.error(f"Excel validation error: {e}")
+            raise
         except Exception as e:
             logger.error(f"Error parsing Excel file: {e}")
             raise Exception(f"Failed to parse Excel file: {e}")

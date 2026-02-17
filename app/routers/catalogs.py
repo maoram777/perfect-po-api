@@ -1,5 +1,6 @@
 from fastapi import APIRouter, Depends, HTTPException, status, UploadFile, File, Form, Query
 from typing import List, Optional
+import asyncio
 from ..auth.dependencies import get_current_active_user
 from ..models.user import User
 from ..models.catalog import CatalogResponse, CatalogCreate, CatalogUpdate
@@ -78,10 +79,18 @@ async def upload_catalog_file(
         }
         
     except ValueError as e:
-        logger.error(f"Validation error during upload: {e}")
+        error_message = str(e)
+        # Check if error is about missing required headers
+        if "Missing required" in error_message and "headers" in error_message:
+            logger.error(f"Missing required CSV headers: {error_message}")
+            raise HTTPException(
+                status_code=status.HTTP_405_METHOD_NOT_ALLOWED,
+                detail=error_message
+            )
+        logger.error(f"Validation error: {error_message}")
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail=str(e)
+            detail=error_message
         )
     except HTTPException:
         # Re-raise HTTP exceptions as-is
@@ -274,7 +283,7 @@ async def get_catalog_summary(
         pipeline = [
             {"$match": {"catalog_id": ObjectId(catalog_id), "user_id": ObjectId(current_user.id)}},
             {"$group": {
-                "_id": "$enrichment_status",
+                "_id": "$enrichment.status",
                 "count": {"$sum": 1}
             }}
         ]
@@ -350,30 +359,34 @@ async def trigger_enrichment(
                 detail=f"Invalid provider: {provider}. Available providers: {', '.join(available_providers)}"
             )
         
-        # Use local enrichment service for immediate processing
+        # Spawn background task for enrichment (runs after HTTP response)
         try:
-            enrichment_result = await local_enrichment_service.enrich_catalog(
-                catalog_id=catalog_id,
-                user_id=str(current_user.id),
-                provider=provider
+            # Create background task that will continue after HTTP response closes
+            background_task = asyncio.create_task(
+                local_enrichment_service.enrich_catalog_products_background(
+                    catalog_id=catalog_id,
+                    user_id=str(current_user.id),
+                    provider=provider,
+                    bulk_size=50
+                )
             )
             
-            logger.info(f"Local enrichment completed for catalog {catalog_id} using {provider} provider")
+            # Don't await the task - let it run in background
+            logger.info(f"🚀 Background enrichment task spawned for catalog {catalog_id}")
+            
             return {
-                "message": "Enrichment process completed successfully",
+                "message": "Enrichment process started in background",
                 "catalog_id": catalog_id,
-                "total_items": enrichment_result["total_items"],
-                "enriched_items": enrichment_result["enriched_items"],
-                "failed_items": enrichment_result["failed_items"],
-                "status": enrichment_result["status"],
-                "provider": provider
+                "status": "processing",
+                "provider": provider,
+                "note": "Enrichment is running asynchronously. Check enrichment status using GET /catalogs/{catalog_id}/enrichment-status"
             }
             
         except Exception as e:
-            logger.error(f"Local enrichment failed: {e}")
+            logger.error(f"Failed to start background enrichment: {e}")
             raise HTTPException(
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                detail=f"Enrichment failed: {str(e)}"
+                detail=f"Failed to start enrichment: {str(e)}"
             )
         
     except HTTPException:

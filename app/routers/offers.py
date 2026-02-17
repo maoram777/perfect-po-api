@@ -71,7 +71,7 @@ async def create_offer(
     
     This is the main endpoint for creating offers. It uses the optimal offer generation
     algorithm that:
-    - Only includes products with msrp_validated=True and po_score
+    - Only includes products with profit > 0 and po_score
     - Considers product variety to reduce risk
     - Matches investment amount within grace_percent tolerance
     - Optimizes for best po_score values
@@ -149,7 +149,7 @@ async def create_optimal_offer(
     """Create an optimal offer based on investment amount.
     
     This endpoint generates an optimal offer that:
-    - Only includes products with msrp_validated=True and po_score
+    - Only includes products with profit > 0 and po_score
     - Considers product variety to reduce risk
     - Matches investment amount within grace_percent tolerance
     - Optimizes for best po_score values
