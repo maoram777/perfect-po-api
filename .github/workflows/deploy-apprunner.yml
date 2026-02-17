@@ -47,36 +47,123 @@ jobs:
 
           echo "image=$ECR_REGISTRY/${{ env.ECR_REPOSITORY }}:$IMAGE_TAG" >> $GITHUB_OUTPUT
 
-      - name: Prepare App Runner config (update)
-        id: apprunner-config
-        env:
-          IMAGE_ID: ${{ steps.build-image.outputs.image }}
+      - name: Get App Runner service config (if exists)
+        id: get-service-config
         run: |
           set -e
-          # Create a temp update config that points to the freshly pushed image
+          SERVICE_ARN=$(aws apprunner list-services --query "ServiceSummaryList[?ServiceName=='${{ env.SERVICE_NAME }}'].ServiceArn" --output text || echo "")
+          if [ -n "$SERVICE_ARN" ]; then
+            echo "📋 Fetching existing service configuration..."
+            aws apprunner describe-service --service-arn "$SERVICE_ARN" > /tmp/service-description.json
+            echo "service-arn=$SERVICE_ARN" >> $GITHUB_OUTPUT
+            echo "service-exists=true" >> $GITHUB_OUTPUT
+          else
+            echo "service-exists=false" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Generate App Runner update config
+        id: generate-update-config
+        env:
+          IMAGE_ID: ${{ steps.build-image.outputs.image }}
+        if: steps.get-service-config.outputs.service-exists == 'true'
+        run: |
+          set -e
+          echo "📝 Generating App Runner update config..."
+          
+          # Get existing config and only update the image identifier
+          # This preserves all existing environment variables configured in App Runner
           jq --arg IMAGE_ID "$IMAGE_ID" \
-             '.SourceConfiguration.ImageRepository.ImageIdentifier = $IMAGE_ID' \
-             apprunner-update-config.json > /tmp/apprunner-update.json
+             '{
+               SourceConfiguration: {
+                 ImageRepository: {
+                   ImageIdentifier: $IMAGE_ID,
+                   ImageConfiguration: {
+                     Port: .Service.SourceConfiguration.ImageRepository.ImageConfiguration.Port,
+                     RuntimeEnvironmentVariables: .Service.SourceConfiguration.ImageRepository.ImageConfiguration.RuntimeEnvironmentVariables
+                   },
+                   ImageRepositoryType: .Service.SourceConfiguration.ImageRepository.ImageRepositoryType
+                 },
+                 AutoDeploymentsEnabled: .Service.SourceConfiguration.AutoDeploymentsEnabled,
+                 AuthenticationConfiguration: .Service.SourceConfiguration.AuthenticationConfiguration
+               },
+               InstanceConfiguration: .Service.InstanceConfiguration,
+               HealthCheckConfiguration: .Service.HealthCheckConfiguration
+             }' \
+             /tmp/service-description.json > /tmp/apprunner-update.json
+          
+          echo "✅ Update config generated (preserving existing env vars)"
+
+      - name: Generate App Runner create config
+        id: generate-create-config
+        env:
+          IMAGE_ID: ${{ steps.build-image.outputs.image }}
+          APP_RUNNER_ECR_ROLE_ARN: ${{ secrets.APP_RUNNER_ECR_ROLE_ARN }}
+          APP_RUNNER_INSTANCE_ROLE_ARN: ${{ secrets.APP_RUNNER_INSTANCE_ROLE_ARN }}
+        if: steps.get-service-config.outputs.service-exists == 'false'
+        run: |
+          set -e
+          echo "📝 Generating App Runner create config..."
+          
+          # Extract AWS account ID from ECR registry
+          ECR_REGISTRY="${{ steps.login-ecr.outputs.registry }}"
+          AWS_ACCOUNT_ID=$(echo $ECR_REGISTRY | cut -d'.' -f1)
+          
+          # Use secrets if available, otherwise construct default ARNs
+          ECR_ROLE_ARN="${APP_RUNNER_ECR_ROLE_ARN:-arn:aws:iam::${AWS_ACCOUNT_ID}:role/AppRunnerECRAccessRole}"
+          INSTANCE_ROLE_ARN="${APP_RUNNER_INSTANCE_ROLE_ARN:-arn:aws:iam::${AWS_ACCOUNT_ID}:role/AppRunnerInstanceRole}"
+          
+          # For new services, create minimal config
+          # Environment variables should be configured in App Runner console after creation
+          cat > /tmp/apprunner-create.json <<EOF
+          {
+            "ServiceName": "${{ env.SERVICE_NAME }}",
+            "SourceConfiguration": {
+              "ImageRepository": {
+                "ImageIdentifier": "$IMAGE_ID",
+                "ImageConfiguration": {
+                  "Port": "8000"
+                },
+                "ImageRepositoryType": "ECR"
+              },
+              "AutoDeploymentsEnabled": false,
+              "AuthenticationConfiguration": {
+                "AccessRoleArn": "$ECR_ROLE_ARN"
+              }
+            },
+            "InstanceConfiguration": {
+              "Cpu": "1 vCPU",
+              "Memory": "2 GB",
+              "InstanceRoleArn": "$INSTANCE_ROLE_ARN"
+            },
+            "HealthCheckConfiguration": {
+              "Protocol": "HTTP",
+              "Path": "/health",
+              "Interval": 10,
+              "Timeout": 5,
+              "HealthyThreshold": 1,
+              "UnhealthyThreshold": 5
+            }
+          }
+          EOF
+          
+          echo "✅ Create config generated"
+          echo "   ECR Role: $ECR_ROLE_ARN"
+          echo "   Instance Role: $INSTANCE_ROLE_ARN"
 
       - name: Update or create App Runner service
-        env:
-          IMAGE_ID: ${{ steps.build-image.outputs.image }}
         run: |
           set -e
-          SERVICE_ARN=$(aws apprunner list-services --query "ServiceSummaryList[?ServiceName=='${{ env.SERVICE_NAME }}'].ServiceArn" --output text)
+          SERVICE_ARN="${{ steps.get-service-config.outputs.service-arn }}"
 
-          if [ -n "$SERVICE_ARN" ]; then
-            echo "⚠️  Service exists, updating..."
+          if [ "${{ steps.get-service-config.outputs.service-exists }}" == "true" ]; then
+            echo "⚠️  Service exists, updating with new image..."
             aws apprunner update-service \
               --service-arn "$SERVICE_ARN" \
               --cli-input-json file:///tmp/apprunner-update.json
-            echo "✅ Service update initiated"
+            echo "✅ Service update initiated (existing env vars preserved)"
           else
             echo "🆕 Service not found, creating new service..."
-            jq --arg IMAGE_ID "$IMAGE_ID" \
-               '.SourceConfiguration.ImageRepository.ImageIdentifier = $IMAGE_ID' \
-               apprunner-config.json > /tmp/apprunner-create.json
-
+            echo "⚠️  Note: After creation, configure environment variables in App Runner console"
             aws apprunner create-service \
               --cli-input-json file:///tmp/apprunner-create.json
             echo "✅ Service creation initiated"
