@@ -35,7 +35,7 @@ class OfferService:
             products = await self.db.products.find({
                 "catalog_id": ObjectId(catalog_id),
                 "user_id": ObjectId(user_id),
-                "enrichment_status": "completed"
+                "enrichment.status": "completed"
             }).to_list(None)
             
             if not products:
@@ -415,10 +415,10 @@ class OfferService:
         max_products_per_category: Optional[int] = None,
         min_po_score: Optional[float] = None
     ) -> Tuple[Optional[Offer], Dict[str, Any]]:
-        """Generate optimal offer based on investment amount, po_score, msrp_validated, and inventory.
+        """Generate optimal offer based on investment amount, po_score, profit, and inventory.
         
         Algorithm:
-        1. Filter products: enriched, po_score exists, msrp_validated = True
+        1. Filter products: enriched, po_score exists, profit > 0 (profitable products)
         2. Sort by po_score (descending) and offer price
         3. Use greedy algorithm with variety constraint
         4. Ensure total matches investment within grace_percent
@@ -439,8 +439,8 @@ class OfferService:
             filter_query = {
                 "catalog_id": ObjectId(catalog_id),
                 "user_id": ObjectId(user_id),
-                "enrichment_status": {"$in": ["completed", "partially_completed"]},
-                "msrp_validated": True,  # Only validated products
+                "enrichment.status": {"$in": ["completed", "partially_completed"]},
+                "profit": {"$gt": 0},  # Only profitable products (profit > 0)
                 "po_score": {"$ne": None}  # Must have PO score
             }
             
@@ -450,7 +450,7 @@ class OfferService:
             products = await self.db.products.find(filter_query).to_list(None)
             
             if not products:
-                raise ValueError("No eligible products found. Products must be enriched, have po_score, and msrp_validated=True")
+                raise ValueError("No eligible products found. Products must be enriched, have po_score, and profit > 0")
             
             # Get catalog information
             catalog = await self.db.catalogs.find_one({
@@ -461,12 +461,11 @@ class OfferService:
             if not catalog:
                 raise ValueError("Catalog not found")
             
-            # Extract offer prices from original_data
+            # Extract offer prices (saved at product level from CSV)
             eligible_products = []
             for product in products:
-                original_data = product.get("original_data", {})
-                offer_price = self._extract_offer_price(original_data)
-                quantity_available = product.get("quantity") or original_data.get("Quantity Available") or 0
+                offer_price = product.get("offer_price")  # Required field, saved at product level
+                quantity_available = product.get("quantity") or 0  # Required field, saved at product level
                 
                 if offer_price and offer_price > 0 and quantity_available > 0:
                     eligible_products.append({
@@ -569,8 +568,8 @@ class OfferService:
             
             for item in selected_items:
                 product = item["product"]
-                original_data = product.get("original_data", {})
-                original_price = self._extract_original_price(original_data) or item["offer_price"]
+                raw_data = product.get("raw_data", {})
+                original_price = self._extract_original_price(raw_data) or item["offer_price"]
                 offer_price = item["offer_price"]
                 quantity = item["quantity"]
                 
@@ -671,12 +670,12 @@ class OfferService:
             logger.error(f"Error generating optimal offer: {e}")
             raise Exception(f"Failed to generate optimal offer: {e}")
     
-    def _extract_offer_price(self, original_data: Dict[str, Any]) -> Optional[float]:
+    def _extract_offer_price(self, raw_data: Dict[str, Any]) -> Optional[float]:
         """Extract offer price from original data."""
         price_fields = ["Offer Price", "offer_price", "offer", "Offer", "Price", "price", "selling_price"]
         
         for field in price_fields:
-            value = original_data.get(field)
+            value = raw_data.get(field)
             if value is not None:
                 try:
                     if isinstance(value, str):
@@ -688,12 +687,12 @@ class OfferService:
                     continue
         return None
     
-    def _extract_original_price(self, original_data: Dict[str, Any]) -> Optional[float]:
+    def _extract_original_price(self, raw_data: Dict[str, Any]) -> Optional[float]:
         """Extract original/MSRP price from original data."""
         price_fields = ["MSRP", "msrp", "RRP", "rrp", "Retail Price", "retail_price", "list_price", "Original Price"]
         
         for field in price_fields:
-            value = original_data.get(field)
+            value = raw_data.get(field)
             if value is not None:
                 try:
                     if isinstance(value, str):

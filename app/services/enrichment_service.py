@@ -102,15 +102,15 @@ class AmazonAPIProvider(EnrichmentProvider):
         
         # Mock response - replace with actual Amazon API call
         return {
-            "amazon_product_id": f"AMZ_{hash(search_term) % 1000000}",
-            "amazon_price": 99.99,
-            "amazon_rating": 4.5,
-            "amazon_review_count": 1250,
-            "amazon_category": "Electronics",
-            "amazon_brand": "Generic Brand",
-            "amazon_features": ["Wireless", "Bluetooth", "Noise Cancelling"],
-            "amazon_images": ["https://example.com/image1.jpg"],
-            "amazon_url": f"https://amazon.com/product/{hash(search_term) % 1000000}"
+            "product_id": f"AMZ_{hash(search_term) % 1000000}",
+            "price": 99.99,
+            "rating": 4.5,
+            "review_count": 1250,
+            "category": "Electronics",
+            "brand": "Generic Brand",
+            "features": ["Wireless", "Bluetooth", "Noise Cancelling"],
+            "images": ["https://example.com/image1.jpg"],
+            "url": f"https://amazon.com/product/{hash(search_term) % 1000000}"
         }
 
 
@@ -244,6 +244,61 @@ class KeepaAPIProvider(EnrichmentProvider):
                 "enrichment_errors": [str(e)],
                 "enriched_at": datetime.utcnow()
             }
+    
+    async def _call_keepa_api_bulk_by_asin(self, asins: List[str]) -> Dict[str, Dict[str, Any]]:
+        """Call Keepa API to get product information for multiple ASINs in bulk.
+        
+        Args:
+            asins: List of ASINs (up to 50)
+        
+        Returns:
+            Dictionary mapping ASIN to enriched data dict, or empty dict if failed
+        """
+        logger.info(f"Keepa API - Bulk call for {len(asins)} ASINs")
+        
+        if not self.api_key:
+            logger.error("Keepa API - No API key configured, cannot make bulk call")
+            return {}
+        
+        if len(asins) > 50:
+            logger.warning(f"Keepa API - Bulk call limited to 50 ASINs, got {len(asins)}, using first 50")
+            asins = asins[:50]
+        
+        try:
+            async with httpx.AsyncClient() as client:
+                product_url = f"{self.base_url}/product"
+                # Keepa API accepts comma-separated ASINs
+                asin_string = ",".join(asins)
+                params = {
+                    "key": self.api_key,
+                    "domain": 1,
+                    "asin": asin_string,
+                    "images": 1,
+                    "history": 0,
+                    "offers": 0
+                }
+                
+                headers = {"User-Agent": "Perfect-PO-API/1.0"}
+                
+                response = await client.get(product_url, params=params, headers=headers, timeout=60.0)
+                response.raise_for_status()
+                
+                product_data = response.json()
+                products = product_data.get("products", [])
+                
+                # Map products by ASIN
+                result = {}
+                for product in products:
+                    asin = product.get("asin")
+                    if asin:
+                        result[asin] = self._process_keepa_product_response(product, identifier=asin, identifier_type="asin")
+                
+                logger.info(f"Keepa API - Bulk call returned {len(result)} products")
+                return result
+                
+        except Exception as e:
+            logger.error(f"Keepa API bulk call error: {e}")
+            return {}
     
     async def _call_keepa_api_by_asin(self, asin: str) -> Dict[str, Any]:
         """Call Keepa API to get product information using ASIN."""
@@ -476,38 +531,38 @@ class KeepaAPIProvider(EnrichmentProvider):
             rating = detailed_product.get("rating")
             review_count = detailed_product.get("reviewCount", 0)
         
-        # Build response data
+        # Build response data with standardized keys (no source prefix)
         response_data = {
-            "keepa_product_id": detailed_product.get("asin", ""),
-            "keepa_price": self._extract_keepa_price(detailed_product),
-            "keepa_rating": rating,
-            "keepa_review_count": review_count,
-            "keepa_category": category,
-            "keepa_brand": detailed_product.get("brand", "Unknown Brand"),
-            "keepa_color": detailed_product.get("color", ""),
-            "keepa_features": detailed_product.get("features", []),
-            "keepa_images": images,
-            "keepa_main_image": main_image,
-            "keepa_url": f"https://keepa.com/product.html#1!{detailed_product.get('asin', '')}",
-            "keepa_status": "real_data",
-            "keepa_title": detailed_product.get("title", ""),
-            "keepa_description": detailed_product.get("description", ""),
-            "keepa_manufacturer": detailed_product.get("manufacturer", "Unknown Manufacturer"),
-            "keepa_model": detailed_product.get("model", ""),
-            "keepa_part_number": detailed_product.get("partNumber", ""),
-            "keepa_size": detailed_product.get("size", ""),
-            "keepa_style": detailed_product.get("style", ""),
-            "keepa_upc_list": detailed_product.get("upcList", []),
-            "keepa_ean_list": detailed_product.get("eanList", [])
+            "product_id": detailed_product.get("asin", ""),
+            "price": self._extract_keepa_price(detailed_product),
+            "rating": rating,
+            "review_count": review_count,
+            "category": category,
+            "brand": detailed_product.get("brand", "Unknown Brand"),
+            "color": detailed_product.get("color", ""),
+            "features": detailed_product.get("features", []),
+            "images": images,
+            "main_image": main_image,
+            "url": f"https://keepa.com/product.html#1!{detailed_product.get('asin', '')}",
+            "status": "real_data",
+            "title": detailed_product.get("title", ""),
+            "description": detailed_product.get("description", ""),
+            "manufacturer": detailed_product.get("manufacturer", "Unknown Manufacturer"),
+            "model": detailed_product.get("model", ""),
+            "part_number": detailed_product.get("partNumber", ""),
+            "size": detailed_product.get("size", ""),
+            "style": detailed_product.get("style", ""),
+            "upc_list": detailed_product.get("upcList", []),
+            "ean_list": detailed_product.get("eanList", [])
         }
         
         # Add identifier-specific fields
         if identifier_type == "upc":
-            response_data["keepa_upc"] = identifier
+            response_data["upc"] = identifier
         elif identifier_type == "asin":
-            response_data["keepa_asin"] = identifier
+            response_data["asin"] = identifier
         elif identifier_type == "search":
-            response_data["keepa_search_term"] = identifier
+            response_data["search_term"] = identifier
         
         return response_data
     
@@ -599,24 +654,24 @@ class KeepaAPIProvider(EnrichmentProvider):
         ]
         
         return {
-            "keepa_product_id": f"KPA_{hash(upc) % 1000000}",
-            "keepa_price": 89.99,
-            "keepa_rating": 4.3,
-            "keepa_review_count": 980,
-            "keepa_category": "Electronics",
-            "keepa_brand": "Generic Brand",
-            "keepa_color": "Black",
-            "keepa_features": ["Portable", "Rechargeable", "Fast Charging"],
-            "keepa_images": mock_images,
-            "keepa_main_image": mock_images[0],
-            "keepa_url": f"https://keepa.com/product.html#1!{hash(upc) % 1000000}",
-            "keepa_upc": upc,
-            "keepa_status": "mock_data",
-            "keepa_title": f"Mock Product {upc}",
-            "keepa_manufacturer": "Mock Manufacturer",
-            "keepa_model": f"MODEL_{hash(upc) % 10000}",
-            "keepa_part_number": f"PN_{hash(upc) % 10000}",
-            "keepa_upc_list": [upc]
+            "product_id": f"KPA_{hash(upc) % 1000000}",
+            "price": 89.99,
+            "rating": 4.3,
+            "review_count": 980,
+            "category": "Electronics",
+            "brand": "Generic Brand",
+            "color": "Black",
+            "features": ["Portable", "Rechargeable", "Fast Charging"],
+            "images": mock_images,
+            "main_image": mock_images[0],
+            "url": f"https://keepa.com/product.html#1!{hash(upc) % 1000000}",
+            "upc": upc,
+            "status": "mock_data",
+            "title": f"Mock Product {upc}",
+            "manufacturer": "Mock Manufacturer",
+            "model": f"MODEL_{hash(upc) % 10000}",
+            "part_number": f"PN_{hash(upc) % 10000}",
+            "upc_list": [upc]
         }
     
     def _extract_keepa_price(self, product: Dict[str, Any]) -> Optional[float]:
@@ -704,6 +759,226 @@ class LocalEnrichmentService:
         if self._db is None:
             self._db = get_database()
         return self._db
+    
+    async def enrich_catalog_products_background(
+        self,
+        catalog_id: str,
+        user_id: str,
+        provider: str = "keepa",
+        bulk_size: int = 50
+    ) -> None:
+        """Background task to enrich existing products in a catalog using bulk Keepa API calls.
+        
+        This method runs asynchronously and updates catalog enriched_items progressively.
+        It processes products in batches of 50 and uses Keepa API bulk calls.
+        """
+        try:
+            logger.info(f"🚀 Starting background enrichment for catalog {catalog_id}")
+            
+            # Validate provider
+            if provider not in self.providers:
+                logger.error(f"Unknown provider: {provider}")
+                await self.db.catalogs.update_one(
+                    {"_id": ObjectId(catalog_id)},
+                    {"$set": {"status": "failed", "updated_at": datetime.utcnow()}}
+                )
+                return
+            
+            # Update catalog status to processing
+            await self.db.catalogs.update_one(
+                {"_id": ObjectId(catalog_id)},
+                {
+                    "$set": {
+                        "status": "processing",
+                        "enrichment_started_at": datetime.utcnow(),
+                        "enriched_items": 0,
+                        "updated_at": datetime.utcnow()
+                    }
+                }
+            )
+            
+            # Get all products for this catalog that need enrichment
+            products_cursor = self.db.products.find({
+                "catalog_id": ObjectId(catalog_id),
+                "user_id": ObjectId(user_id),
+                "$or": [
+                    {"enrichment.status": {"$ne": "completed"}},
+                    {"enrichment.status": {"$exists": False}},
+                    {"enrichment": {"$exists": False}}
+                ]
+            })
+            
+            products = await products_cursor.to_list(None)
+            total_products = len(products)
+            
+            if total_products == 0:
+                logger.info(f"No products to enrich for catalog {catalog_id}")
+                await self.db.catalogs.update_one(
+                    {"_id": ObjectId(catalog_id)},
+                    {
+                        "$set": {
+                            "status": "completed",
+                            "enrichment_completed_at": datetime.utcnow(),
+                            "updated_at": datetime.utcnow()
+                        }
+                    }
+                )
+                return
+            
+            logger.info(f"📦 Found {total_products} products to enrich")
+            
+            enriched_count = 0
+            failed_count = 0
+            keepa_provider = self.providers.get("keepa")
+            
+            # Process products in batches of bulk_size (50)
+            for batch_start in range(0, total_products, bulk_size):
+                batch = products[batch_start:batch_start + bulk_size]
+                batch_num = (batch_start // bulk_size) + 1
+                total_batches = (total_products + bulk_size - 1) // bulk_size
+                
+                logger.info(f"🔄 Processing batch {batch_num}/{total_batches} ({len(batch)} products)")
+                
+                # Step 1: Get UPCs and enrich to get ASINs (if needed for bulk)
+                # For now, process concurrently in groups for efficiency
+                # We'll use asyncio.gather to process up to 50 products concurrently
+                
+                async def enrich_single_product(product: Dict[str, Any]) -> tuple:
+                    """Enrich a single product and return (product_id, success, enrichment_result)."""
+                    try:
+                        upc = product.get("upc")
+                        if not upc:
+                            logger.warning(f"Product {product.get('_id')} has no UPC, skipping")
+                            return (product["_id"], False, None)
+                        
+                        # Enrich product using Keepa API
+                        enrichment_result = await keepa_provider.enrich_item({
+                            "UPC": upc,
+                            "upc": upc
+                        })
+                        
+                        return (product["_id"], True, enrichment_result)
+                    except Exception as e:
+                        logger.error(f"Error enriching product {product.get('_id')}: {e}")
+                        return (product["_id"], False, None)
+                
+                # Process batch concurrently
+                tasks = [enrich_single_product(product) for product in batch]
+                results = await asyncio.gather(*tasks, return_exceptions=True)
+                
+                # Step 2: Update products with enrichment data
+                for result in results:
+                    if isinstance(result, Exception):
+                        logger.error(f"Task exception: {result}")
+                        failed_count += 1
+                        continue
+                    
+                    product_id, success, enrichment_result = result
+                    
+                    if not success or not enrichment_result:
+                        failed_count += 1
+                        # Update product with failed status
+                        await self.db.products.update_one(
+                            {"_id": product_id},
+                            {
+                                "$set": {
+                                    "enrichment": {
+                                        "source": provider,
+                                        "status": "failed",
+                                        "errors": ["Enrichment failed"],
+                                        "data": {}
+                                    },
+                                    "updated_at": datetime.utcnow()
+                                }
+                            }
+                        )
+                        continue
+                    
+                    # Get product to access offer_price
+                    product = await self.db.products.find_one({"_id": product_id})
+                    if not product:
+                        failed_count += 1
+                        continue
+                    
+                    # Update product with enrichment data
+                    enriched_data = enrichment_result.get("enriched_data", {})
+                    product_price = enriched_data.get("price")
+                    
+                    # Calculate profit if we have offer_price
+                    offer_price = product.get("offer_price")
+                    profit = None
+                    if offer_price and product_price:
+                        profit = self.calculate_profit(offer_price, product_price, cogs_percentage=0.35)
+                    
+                    # Update product
+                    await self.db.products.update_one(
+                        {"_id": product_id},
+                        {
+                            "$set": {
+                                "enrichment": {
+                                    "source": enrichment_result.get("enrichment_source"),
+                                    "status": enrichment_result.get("enrichment_status", "pending"),
+                                    "errors": enrichment_result.get("enrichment_errors", []),
+                                    "data": enriched_data
+                                },
+                                "profit": profit,
+                                "enriched_at": enrichment_result.get("enriched_at", datetime.utcnow()),
+                                "updated_at": datetime.utcnow()
+                            }
+                        }
+                    )
+                    
+                    if enrichment_result.get("enrichment_status") == "completed":
+                        enriched_count += 1
+                    else:
+                        failed_count += 1
+                
+                # Update catalog enriched_items after each batch
+                await self.db.catalogs.update_one(
+                    {"_id": ObjectId(catalog_id)},
+                    {
+                        "$set": {
+                            "enriched_items": enriched_count,
+                            "updated_at": datetime.utcnow()
+                        }
+                    }
+                )
+                
+                logger.info(f"✅ Batch {batch_num}/{total_batches} completed. Total enriched: {enriched_count}, failed: {failed_count}")
+            
+            # Update final catalog status
+            final_status = "completed" if failed_count == 0 else "partially_completed"
+            await self.db.catalogs.update_one(
+                {"_id": ObjectId(catalog_id)},
+                {
+                    "$set": {
+                        "status": final_status,
+                        "enriched_items": enriched_count,
+                        "enrichment_completed_at": datetime.utcnow(),
+                        "updated_at": datetime.utcnow()
+                    }
+                }
+            )
+            
+            logger.info(f"🎉 Background enrichment completed for catalog {catalog_id}. Enriched: {enriched_count}, Failed: {failed_count}")
+            
+        except Exception as e:
+            logger.error(f"❌ Background enrichment failed for catalog {catalog_id}: {e}")
+            import traceback
+            logger.error(f"Traceback: {traceback.format_exc()}")
+            # Update catalog status to failed
+            try:
+                await self.db.catalogs.update_one(
+                    {"_id": ObjectId(catalog_id)},
+                    {
+                        "$set": {
+                            "status": "failed",
+                            "updated_at": datetime.utcnow()
+                        }
+                    }
+                )
+            except Exception as update_error:
+                logger.error(f"Failed to update catalog status: {update_error}")
     
     async def enrich_catalog(
         self, 
@@ -853,54 +1128,44 @@ class LocalEnrichmentService:
             logger.info(f"Debug: Enrichment result keys: {list(enrichment_result.keys())}")
             if 'enriched_data' in enrichment_result:
                 logger.info(f"Debug: Enriched data keys: {list(enrichment_result['enriched_data'].keys())}")
-                logger.info(f"Debug: Looking for keepa_main_image: {enrichment_result['enriched_data'].get('keepa_main_image')}")
-                logger.info(f"Debug: Looking for keepa_images: {enrichment_result['enriched_data'].get('keepa_images')}")
+                logger.info(f"Debug: Looking for main_image: {enrichment_result['enriched_data'].get('main_image')}")
+                logger.info(f"Debug: Looking for images: {enrichment_result['enriched_data'].get('images')}")
             
-            # Extract image fields from enrichment based on provider
+            # Extract enrichment data from result
             enrichment_source = enrichment_result.get("enrichment_source", "")
             enriched_data = enrichment_result.get("enriched_data", {})
             
-            if "keepa" in enrichment_source.lower():
-                # Keepa provider
-                main_image = self._extract_image_from_enrichment(enrichment_result, "keepa_main_image")
-                images = self._extract_images_from_enrichment(enrichment_result, "keepa_images")
-                # Use Keepa color if available, otherwise fall back to Excel
-                color = self._extract_single_color(enriched_data.get("keepa_color") or self._extract_colors_from_excel(item_data))
-            elif "amazon" in enrichment_source.lower():
-                # Amazon provider
-                main_image = self._extract_image_from_enrichment(enrichment_result, "amazon_images")
-                images = self._extract_images_from_enrichment(enrichment_result, "amazon_images")
-                color = self._extract_single_color(self._extract_colors_from_excel(item_data))
-            else:
-                # Unknown provider, try both
-                main_image = self._extract_image_from_enrichment(enrichment_result, "keepa_main_image") or self._extract_image_from_enrichment(enrichment_result, "amazon_images")
-                images = self._extract_images_from_enrichment(enrichment_result, "keepa_images") or self._extract_images_from_enrichment(enrichment_result, "amazon_images")
-                color = self._extract_single_color(enriched_data.get("keepa_color") or self._extract_colors_from_excel(item_data))
+            # Extract images and color using standardized keys (no source prefix)
+            main_image = self._extract_image_from_enrichment(enrichment_result, "main_image")
+            images = self._extract_images_from_enrichment(enrichment_result, "images")
+            # Use enriched color if available, otherwise fall back to Excel
+            color = self._extract_single_color(enriched_data.get("color") or self._extract_colors_from_excel(item_data))
             
             # Extract size from Index column or other sources
             size = self._extract_size_from_item_data(item_data)
             
+            # Extract required fields from raw_data (must exist due to CSV validation)
+            # These are saved at product level for easy access
+            sku = self._extract_field_value(item_data, ["SKU", "sku", "Article Number", "product_sku", "item_sku", "product_code", "item_code"])
+            upc = self._extract_field_value(item_data, ["UPC", "upc", "barcode", "ean", "product_upc", "item_upc"])
+            quantity = self._extract_numeric_field(item_data, ["quantity", "Quantity", "Inventory", "Quantity Available", "product_quantity", "item_quantity", "qty", "stock"])
+            offer_price = self._extract_numeric_field(item_data, ["offer_price", "Offer Price", "offer", "Offer", "Price", "price", "selling_price"])
+            
             # Extract pricing fields for PO score calculation
             whs = self._extract_numeric_field(item_data, ["WHS", "whs", "Warehouse Price", "warehouse_price", "warehouse", "cost_price"])
             msrp = self._extract_numeric_field(item_data, ["MSRP", "msrp", "Manufacturer Recommended Retail Price", "RRP", "rrp", "Retail Price", "retail_price", "list_price"])
-            offer = self._extract_numeric_field(item_data, ["Offer Price", "offer_price", "offer", "Offer", "Price", "price", "selling_price"])
+            offer = offer_price  # Use the extracted offer_price for PO score calculation
             
             # Calculate PO score if we have the required fields
             po_score = self.calculate_po_score(whs, msrp, offer)
             
-            # Validate MSRP against enriched price from external API
-            # Get enriched price from Keepa or Amazon
-            enriched_price = None
-            if "keepa" in enrichment_source.lower():
-                enriched_price = enriched_data.get("keepa_price")
-            elif "amazon" in enrichment_source.lower():
-                enriched_price = enriched_data.get("amazon_price")
-            else:
-                # Try both if source is unknown
-                enriched_price = enriched_data.get("keepa_price") or enriched_data.get("amazon_price")
+            # Calculate profit percentage: (product_price - cogs - offer_price) / product_price
+            # Get product_price from enrichment using standardized key
+            product_price = enriched_data.get("price")
             
-            # Validate MSRP (within 5% delta)
-            msrp_validated = self.validate_msrp(msrp, enriched_price, delta_percent=5.0)
+            # Calculate profit percentage: (product_price - cogs - offer_price) / product_price
+            # COGS = product_price * 0.35 (35%)
+            profit = self.calculate_profit(offer, product_price, cogs_percentage=0.35)
             
             product_data = {
                 "catalog_id": ObjectId(catalog_id),
@@ -910,25 +1175,28 @@ class LocalEnrichmentService:
                 "description": self._create_description_from_excel(item_data),
                 "category": self._extract_field_value(item_data, ["Category", "Subcategory", "Division", "category", "product_category", "item_category", "type", "product_type"]),
                 "brand": self._extract_field_value(item_data, ["brand", "product_brand", "item_brand", "manufacturer", "make"]),
-                "sku": self._extract_field_value(item_data, ["Article Number", "SKU", "sku", "product_sku", "item_sku", "product_code", "item_code"]),
-                "upc": self._extract_field_value(item_data, ["UPC", "upc", "product_upc", "item_upc", "barcode", "ean"]),
+                "sku": sku,  # Required field from CSV, saved at product level
+                "upc": upc,  # Required field from CSV, saved at product level
                 "price": self._extract_numeric_field(item_data, ["Offer Price", "Wholesale", "RRP", "price", "product_price", "item_price", "cost", "unit_price"]),
                 "currency": self._extract_field_value(item_data, ["Currency", "currency", "product_currency", "item_currency"], "USD"),
-                "quantity": self._extract_numeric_field(item_data, ["Inventory", "Quantity Available", "quantity", "product_quantity", "item_quantity", "qty", "stock"]),
+                "quantity": quantity,  # Required field from CSV, saved at product level
+                "offer_price": offer_price,  # Required field from CSV, saved at product level
                 "unit": self._extract_field_value(item_data, ["unit", "product_unit", "item_unit", "uom", "measurement_unit"], "piece"),
                 "color": color,  # Single color (not array)
                 "size": size,  # Size - can be number (shoes) or dimensions (clothing)
-                "original_data": item_data,
+                "raw_data": item_data,
                 # Add image fields from enrichment
                 "main_image": main_image,
                 "images": images,
-                "enriched_data": enriched_data,
-                "enrichment_source": enrichment_result.get("enrichment_source"),
-                "enrichment_status": enrichment_result.get("enrichment_status"),
-                "enrichment_errors": enrichment_result.get("enrichment_errors", []),
+                "enrichment": {
+                    "source": enrichment_result.get("enrichment_source"),
+                    "status": enrichment_result.get("enrichment_status", "pending"),
+                    "errors": enrichment_result.get("enrichment_errors", []),
+                    "data": enriched_data
+                },
                 "enriched_at": enrichment_result.get("enriched_at"),
                 "po_score": po_score,  # Purchase Order score (calculated from whs, msrp, offer)
-                "msrp_validated": msrp_validated,  # True if source MSRP is within 5% of enriched price
+                "profit": profit,  # Profit percentage = (product_price - cogs - offer_price) / product_price (where cogs = product_price * 35%)
                 "created_at": datetime.utcnow(),
                 "updated_at": datetime.utcnow()
             }
@@ -1144,6 +1412,41 @@ class LocalEnrichmentService:
         score = max(0.0, min(100.0, score))
         
         return round(score, 2)
+    
+    def calculate_profit(self, offer_price: Optional[float], product_price: Optional[float], cogs_percentage: float = 0.35) -> Optional[float]:
+        """Calculate profit percentage based on product price, COGS, and offer price.
+        
+        Profit (as percentage) = (product_price - cogs - offer_price) / product_price
+        COGS = product_price * cogs_percentage (default 35%)
+        
+        Args:
+            offer_price: Offer price from input file (columns: "Offer" or "Offer Price")
+            product_price: Product price from enrichment provider (Keepa/Amazon)
+            cogs_percentage: Percentage of product_price to use for COGS calculation (default: 0.35 = 35%)
+        
+        Returns:
+            Profit as percentage (decimal, e.g., 0.15 = 15%), can be negative, or None if calculation cannot be performed
+        """
+        # Need both values to calculate profit
+        if offer_price is None or product_price is None:
+            return None
+        
+        # Both must be positive
+        if offer_price < 0 or product_price <= 0:
+            return None
+        
+        # Calculate COGS: product_price * percentage
+        cogs = product_price * cogs_percentage
+        
+        # Calculate profit percentage: (product_price - cogs - offer_price) / product_price
+        profit = (product_price - cogs - offer_price) / product_price
+        
+        logger.debug(
+            f"Profit calculation: offer_price={offer_price}, product_price={product_price}, "
+            f"cogs_percentage={cogs_percentage}, cogs={cogs:.2f}, profit={profit:.4f} ({profit*100:.2f}%)"
+        )
+        
+        return round(profit, 4)
     
     def validate_msrp(self, source_msrp: Optional[float], enriched_price: Optional[float], delta_percent: float = 5.0) -> Optional[bool]:
         """Validate that source MSRP is within delta_percent of enriched price from external API.
