@@ -74,6 +74,7 @@ class Offer(OfferBase):
     rules: List[OfferRule] = []
     total_discount: float = 0.0
     total_savings: float = 0.0
+    total_cost: Optional[float] = None  # Actual amount customer pays if they accept (sum of offer_price * quantity per item)
     offer_score: Optional[float] = None  # AI-generated score
     generation_method: str = "rule_based"  # rule_based, ai_generated, hybrid
     created_at: datetime = Field(default_factory=datetime.utcnow)
@@ -107,6 +108,7 @@ class OfferResponse(BaseModel):
     items: List[OfferItemResponse]  # Use OfferItemResponse instead of OfferItem
     total_discount: float
     total_savings: float
+    total_cost: Optional[float] = None  # Actual amount customer pays if they accept the offer
     offer_score: Optional[float]
     generation_method: str
     created_at: datetime

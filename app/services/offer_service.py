@@ -31,24 +31,27 @@ class OfferService:
     ) -> List[Offer]:
         """Generate offers for a specific catalog based on enriched products."""
         try:
-            # Get enriched products from the catalog
-            products = await self.db.products.find({
-                "catalog_id": ObjectId(catalog_id),
-                "user_id": ObjectId(user_id),
-                "enrichment_status": "completed"
-            }).to_list(None)
-            
-            if not products:
-                raise ValueError("No enriched products found for this catalog")
-            
-            # Get catalog information
+            # Get catalog first and ensure offer generation is allowed (completed or partially_completed)
             catalog = await self.db.catalogs.find_one({
                 "_id": ObjectId(catalog_id),
                 "user_id": ObjectId(user_id)
             })
-            
             if not catalog:
                 raise ValueError("Catalog not found")
+            if catalog.get("status") not in ("completed", "partially_completed"):
+                raise ValueError(
+                    f"Catalog must be completed or partially_completed to generate offers (current: {catalog.get('status', 'unknown')})"
+                )
+            
+            # Get enriched products only (skip products that failed to enrich)
+            products = await self.db.products.find({
+                "catalog_id": ObjectId(catalog_id),
+                "user_id": ObjectId(user_id),
+                "enrichment.status": "completed"
+            }).to_list(None)
+            
+            if not products:
+                raise ValueError("No enriched products found for this catalog")
             
             # Generate different types of offers
             offers = []
@@ -130,6 +133,7 @@ class OfferService:
             # Calculate offer metrics
             total_discount = original_price - offer_price
             total_savings = total_discount
+            total_cost = offer_price * 1  # quantity_required=1
             
             # Generate simple offer score (0-10)
             offer_score = round(random.uniform(6.0, 9.5), 1)
@@ -148,6 +152,7 @@ class OfferService:
                 rules=[offer_rule],
                 total_discount=round(discount_percentage, 2),
                 total_savings=total_savings,
+                total_cost=round(total_cost, 2),
                 offer_score=offer_score,
                 generation_method="rule_based"
             )
@@ -209,7 +214,7 @@ class OfferService:
                 continue
             
             # Calculate bundle metrics
-            total_offer_price = sum(item.offer_price for item in bundle_items)
+            total_offer_price = sum(item.offer_price * (item.quantity_required or 1) for item in bundle_items)
             total_discount = total_original_price - total_offer_price
             bundle_discount_percentage = round((total_discount / total_original_price) * 100, 2)
             
@@ -240,6 +245,7 @@ class OfferService:
                 rules=[bundle_rule],
                 total_discount=round(bundle_discount_percentage, 2),
                 total_savings=total_discount,
+                total_cost=round(total_offer_price, 2),
                 offer_score=offer_score,
                 generation_method="rule_based"
             )
@@ -299,6 +305,7 @@ class OfferService:
             # Calculate metrics
             total_discount = original_price - offer_price
             total_savings = total_discount
+            total_cost = offer_price * (offer_item.quantity_required or 1)
             
             # Flash offers get higher scores
             offer_score = round(random.uniform(8.0, 9.9), 1)
@@ -317,6 +324,7 @@ class OfferService:
                 rules=[flash_rule],
                 total_discount=round(discount_percentage, 2),
                 total_savings=total_savings,
+                total_cost=round(total_cost, 2),
                 offer_score=offer_score,
                 generation_method="rule_based"
             )
@@ -415,65 +423,70 @@ class OfferService:
         max_products_per_category: Optional[int] = None,
         min_po_score: Optional[float] = None
     ) -> Tuple[Optional[Offer], Dict[str, Any]]:
-        """Generate optimal offer based on investment amount, po_score, msrp_validated, and inventory.
+        """Generate optimal offer based on investment, availability, profit, and diversity.
         
         Algorithm:
-        1. Filter products: enriched, po_score exists, msrp_validated = True
-        2. Sort by po_score (descending) and offer price
-        3. Use greedy algorithm with variety constraint
-        4. Ensure total matches investment within grace_percent
+        1. Filter products: enriched, profit > 0, valid offer price and availability
+        2. Greedy selection with diversity: at each step, choose to add one unit of a product.
+           New products get a diversity bonus so the offer contains multiple products even if
+           one product has the best profit. Respects quantity_available and budget.
+        3. Quantities per product are chosen to use budget (min to max investment) and
+           availability; the API response tells the customer how much to buy from each product
+           (quantity_required per item).
         
         Args:
             catalog_id: Catalog ID
             user_id: User ID
             investment: Total investment amount
             grace_percent: Allowed deviation from investment (default 5%)
-            max_products_per_category: Maximum products per category for variety (None = no limit)
+            max_products_per_category: Maximum distinct products per category (None = no limit)
             min_po_score: Minimum PO score threshold (None = no threshold)
         
         Returns:
             Tuple of (Offer, metadata dict with selection details)
         """
         try:
-            # Get eligible products
+            # Get catalog first and ensure offer creation is allowed (completed or partially_completed)
+            catalog = await self.db.catalogs.find_one({
+                "_id": ObjectId(catalog_id),
+                "user_id": ObjectId(user_id)
+            })
+            if not catalog:
+                raise ValueError("Catalog not found")
+            if catalog.get("status") not in ("completed", "partially_completed"):
+                raise ValueError(
+                    f"Catalog must be completed or partially_completed to create offers (current: {catalog.get('status', 'unknown')})"
+                )
+            
+            # Get eligible products: only successfully enriched (skip failed), profit > 0
             filter_query = {
                 "catalog_id": ObjectId(catalog_id),
                 "user_id": ObjectId(user_id),
-                "enrichment_status": {"$in": ["completed", "partially_completed"]},
-                "msrp_validated": True,  # Only validated products
-                "po_score": {"$ne": None}  # Must have PO score
+                "enrichment.status": "completed",  # Skip products that failed to enrich
+                "profit": {"$gt": 0},  # Only profitable products
             }
-            
             if min_po_score is not None:
                 filter_query["po_score"] = {"$ne": None, "$gte": min_po_score}
             
             products = await self.db.products.find(filter_query).to_list(None)
             
             if not products:
-                raise ValueError("No eligible products found. Products must be enriched, have po_score, and msrp_validated=True")
+                raise ValueError("No eligible products found. Products must be enriched and have profit > 0")
             
-            # Get catalog information
-            catalog = await self.db.catalogs.find_one({
-                "_id": ObjectId(catalog_id),
-                "user_id": ObjectId(user_id)
-            })
-            
-            if not catalog:
-                raise ValueError("Catalog not found")
-            
-            # Extract offer prices from original_data
+            # Extract offer prices (saved at product level from CSV)
             eligible_products = []
             for product in products:
-                original_data = product.get("original_data", {})
-                offer_price = self._extract_offer_price(original_data)
-                quantity_available = product.get("quantity") or original_data.get("Quantity Available") or 0
+                offer_price = product.get("offer_price")  # Required field, saved at product level
+                quantity_available = product.get("quantity") or 0  # Required field, saved at product level
                 
                 if offer_price and offer_price > 0 and quantity_available > 0:
+                    profit = product.get("profit")
                     eligible_products.append({
                         "product_id": product["_id"],
                         "product": product,
                         "offer_price": float(offer_price),
-                        "po_score": product.get("po_score", 0),
+                        "profit": (profit if profit is not None else 0.0),
+                        "po_score": product.get("po_score") or 0,
                         "quantity_available": int(quantity_available),
                         "category": product.get("category") or "Uncategorized",
                         "name": product.get("name", "Unknown Product")
@@ -482,82 +495,114 @@ class OfferService:
             if not eligible_products:
                 raise ValueError("No products with valid offer prices and inventory found")
             
-            # Sort by po_score (descending) and then by offer_price (ascending for better deals)
-            eligible_products.sort(key=lambda x: (-x["po_score"], x["offer_price"]))
+            # Sort by profit (descending, most profitable first) then by offer_price
+            eligible_products.sort(key=lambda x: (-x["profit"], x["offer_price"]))
             
             # Calculate investment bounds
             min_investment = investment * (1 - grace_percent / 100)
             max_investment = investment * (1 + grace_percent / 100)
             
-            # Greedy selection with variety constraint
-            selected_items = []
+            # Greedy selection: decide how many of each product to offer.
+            # Diversity: (1) prefer new products (diversity_bonus), (2) down-weight products we already have many units of (quantity penalty).
+            # So we get a more even spread across products instead of piling 200+ units on one item.
+            DIVERSITY_BONUS = 2.5  # Strongly prefer adding new products first
+            QUANTITY_PENALTY = 0.2  # Down-weight adding more units to products we already have many of: score /= (1 + penalty * qty)
+            selected = {}  # product_id -> { "product_info": ..., "quantity": int }
             total_cost = 0.0
-            category_counts = {}
             total_po_score = 0.0
+            total_profit_pct = 0.0
+            category_counts = {}  # units per category
+            distinct_products_per_category = {}  # distinct product count per category (for max_products_per_category)
+            
+            def can_add_one(pid, info, current_qty):
+                qty_available = info["quantity_available"]
+                if current_qty >= qty_available:
+                    return False
+                cost = info["offer_price"]
+                if total_cost + cost > max_investment:
+                    return False
+                if max_products_per_category is not None and current_qty == 0:
+                    cat = info["category"]
+                    if distinct_products_per_category.get(cat, 0) >= max_products_per_category:
+                        return False
+                return True
+            
+            def score_add_one(profit: float, is_new: bool, current_qty: int) -> float:
+                base = profit * (DIVERSITY_BONUS if is_new else 1.0)
+                # Quantity penalty: don't stack too many units on one product
+                divisor = 1.0 + QUANTITY_PENALTY * current_qty
+                return base / divisor
+            
+            while total_cost < max_investment:
+                best_score = -1.0
+                best_key = None
+                for info in eligible_products:
+                    pid = info["product_id"]
+                    current_qty = selected.get(pid, {}).get("quantity", 0)
+                    if not can_add_one(pid, info, current_qty):
+                        continue
+                    profit = info["profit"]
+                    is_new = current_qty == 0
+                    score = score_add_one(profit, is_new, current_qty)
+                    if score > best_score:
+                        best_score = score
+                        best_key = pid
+                
+                if best_key is None:
+                    break
+                
+                info = next(p for p in eligible_products if p["product_id"] == best_key)
+                if best_key not in selected:
+                    selected[best_key] = {"product_info": info, "quantity": 0}
+                    distinct_products_per_category[info["category"]] = distinct_products_per_category.get(info["category"], 0) + 1
+                selected[best_key]["quantity"] += 1
+                total_cost += info["offer_price"]
+                total_po_score += info["po_score"]
+                total_profit_pct += info["profit"] * 100
+                category_counts[info["category"]] = category_counts.get(info["category"], 0) + 1
+                
+                if total_cost >= max_investment:
+                    break
+            
+            # If we're under min_investment, try to add more units (use same quantity penalty so we spread)
+            if total_cost < min_investment:
+                while total_cost < min_investment:
+                    best_score = -1.0
+                    best_key = None
+                    for pid, data in selected.items():
+                        info = data["product_info"]
+                        if not can_add_one(pid, info, data["quantity"]):
+                            continue
+                        if total_cost + info["offer_price"] > max_investment:
+                            continue
+                        score = score_add_one(info["profit"], False, data["quantity"])
+                        if score > best_score:
+                            best_score = score
+                            best_key = pid
+                    if best_key is None:
+                        break
+                    selected[best_key]["quantity"] += 1
+                    total_cost += selected[best_key]["product_info"]["offer_price"]
+                    total_po_score += selected[best_key]["product_info"]["po_score"]
+                    total_profit_pct += selected[best_key]["product_info"]["profit"] * 100
+                    if total_cost >= min_investment:
+                        break
+            
+            selected_items = [
+                {"product_id": pid, "product": data["product_info"]["product"], "offer_price": data["product_info"]["offer_price"], "po_score": data["product_info"]["po_score"], "quantity": data["quantity"], "product_info": data["product_info"]}
+                for pid, data in selected.items()
+            ]
+            
             selection_metadata = {
                 "products_considered": len(eligible_products),
-                "products_selected": 0,
+                "products_selected": len(selected_items),
                 "total_investment": investment,
                 "actual_total": 0.0,
                 "deviation_percent": 0.0,
                 "average_po_score": 0.0,
+                "average_profit_percent": 0.0,
                 "categories_included": []
             }
-            
-            for product_info in eligible_products:
-                # Check if adding this product would exceed budget
-                if total_cost + product_info["offer_price"] > max_investment:
-                    continue
-                
-                # Check variety constraint (max products per category)
-                category = product_info["category"]
-                if max_products_per_category:
-                    if category_counts.get(category, 0) >= max_products_per_category:
-                        continue
-                
-                # Add product (quantity = 1 for now, can be extended)
-                selected_items.append({
-                    "product_id": product_info["product_id"],
-                    "product": product_info["product"],
-                    "offer_price": product_info["offer_price"],
-                    "po_score": product_info["po_score"],
-                    "quantity": 1
-                })
-                
-                total_cost += product_info["offer_price"]
-                total_po_score += product_info["po_score"]
-                category_counts[category] = category_counts.get(category, 0) + 1
-                
-                # Stop if we've reached minimum investment
-                if total_cost >= min_investment:
-                    break
-            
-            # If we haven't reached minimum, try to fill with smaller items
-            if total_cost < min_investment:
-                remaining = min_investment - total_cost
-                for product_info in eligible_products:
-                    if product_info["product_id"] in [item["product_id"] for item in selected_items]:
-                        continue
-                    
-                    if product_info["offer_price"] <= remaining and total_cost + product_info["offer_price"] <= max_investment:
-                        category = product_info["category"]
-                        if max_products_per_category and category_counts.get(category, 0) >= max_products_per_category:
-                            continue
-                        
-                        selected_items.append({
-                            "product_id": product_info["product_id"],
-                            "product": product_info["product"],
-                            "offer_price": product_info["offer_price"],
-                            "po_score": product_info["po_score"],
-                            "quantity": 1
-                        })
-                        
-                        total_cost += product_info["offer_price"]
-                        total_po_score += product_info["po_score"]
-                        category_counts[category] = category_counts.get(category, 0) + 1
-                        
-                        if total_cost >= min_investment:
-                            break
             
             if not selected_items:
                 raise ValueError(f"Could not create offer within investment range (${min_investment:.2f} - ${max_investment:.2f})")
@@ -569,8 +614,8 @@ class OfferService:
             
             for item in selected_items:
                 product = item["product"]
-                original_data = product.get("original_data", {})
-                original_price = self._extract_original_price(original_data) or item["offer_price"]
+                raw_data = product.get("raw_data", {})
+                original_price = self._extract_original_price(raw_data) or item["offer_price"]
                 offer_price = item["offer_price"]
                 quantity = item["quantity"]
                 
@@ -587,7 +632,7 @@ class OfferService:
                     discount_percentage=round(discount_percentage, 2),
                     quantity_required=quantity,
                     max_quantity=item["product"].get("quantity", 1),
-                    notes=f"PO Score: {item['po_score']:.1f}",
+                    notes="",
                     upc=product.get("upc"),
                     sku=product.get("sku")
                 )
@@ -597,9 +642,11 @@ class OfferService:
                 total_offer_price += offer_price * quantity
             
             # Calculate metrics
+            total_units = sum(item["quantity"] for item in selected_items)
             total_discount = total_original_price - total_offer_price
             total_discount_percentage = (total_discount / total_original_price * 100) if total_original_price > 0 else 0
-            average_po_score = total_po_score / len(selected_items) if selected_items else 0
+            average_po_score = total_po_score / total_units if total_units else 0
+            average_profit_percent = total_profit_pct / total_units if total_units else 0
             
             # Calculate offer score based on po_score and variety
             variety_score = min(100, len(category_counts) * 10)  # 10 points per category, max 100
@@ -626,7 +673,7 @@ class OfferService:
                 catalog_id=ObjectId(catalog_id),
                 user_id=ObjectId(user_id),
                 name=f"Optimal Offer - ${investment:,.2f} Investment",
-                description=f"Optimized offer with {len(selected_items)} products, average PO score: {average_po_score:.1f}",
+                description=f"Optimized offer with {len(selected_items)} products",
                 offer_type="optimal",
                 valid_from=datetime.utcnow(),
                 valid_until=datetime.utcnow() + timedelta(days=30),
@@ -635,6 +682,7 @@ class OfferService:
                 rules=[offer_rule],
                 total_discount=round(total_discount_percentage, 2),
                 total_savings=round(total_discount, 2),
+                total_cost=round(total_offer_price, 2),
                 offer_score=offer_score,
                 generation_method="optimal_algorithm"
             )
@@ -653,6 +701,7 @@ class OfferService:
                 "actual_total": round(total_offer_price, 2),
                 "deviation_percent": round(deviation_percent, 2),
                 "average_po_score": round(average_po_score, 2),
+                "average_profit_percent": round(average_profit_percent, 2),
                 "categories_included": list(category_counts.keys()),
                 "category_distribution": category_counts,
                 "total_savings": round(total_discount, 2),
@@ -667,43 +716,21 @@ class OfferService:
             
             return saved_offer, selection_metadata
             
+        except ValueError:
+            raise
         except Exception as e:
             logger.error(f"Error generating optimal offer: {e}")
             raise Exception(f"Failed to generate optimal offer: {e}")
     
-    def _extract_offer_price(self, original_data: Dict[str, Any]) -> Optional[float]:
-        """Extract offer price from original data."""
-        price_fields = ["Offer Price", "offer_price", "offer", "Offer", "Price", "price", "selling_price"]
-        
-        for field in price_fields:
-            value = original_data.get(field)
-            if value is not None:
-                try:
-                    if isinstance(value, str):
-                        cleaned_value = value.replace('$', '').replace('€', '').replace(',', '').replace(' ', '').strip()
-                        return float(cleaned_value)
-                    else:
-                        return float(value)
-                except (ValueError, TypeError):
-                    continue
-        return None
-    
-    def _extract_original_price(self, original_data: Dict[str, Any]) -> Optional[float]:
-        """Extract original/MSRP price from original data."""
-        price_fields = ["MSRP", "msrp", "RRP", "rrp", "Retail Price", "retail_price", "list_price", "Original Price"]
-        
-        for field in price_fields:
-            value = original_data.get(field)
-            if value is not None:
-                try:
-                    if isinstance(value, str):
-                        cleaned_value = value.replace('$', '').replace('€', '').replace(',', '').replace(' ', '').strip()
-                        return float(cleaned_value)
-                    else:
-                        return float(value)
-                except (ValueError, TypeError):
-                    continue
-        return None
+    def _extract_offer_price(self, raw_data: Dict[str, Any]) -> Optional[float]:
+        """Extract offer price from raw_data (see constants.catalog_headers)."""
+        from ..constants.catalog_headers import get_numeric_value
+        return get_numeric_value(raw_data, "offer_price")
+
+    def _extract_original_price(self, raw_data: Dict[str, Any]) -> Optional[float]:
+        """Extract MSRP/original price from raw_data (see constants.catalog_headers)."""
+        from ..constants.catalog_headers import get_numeric_value
+        return get_numeric_value(raw_data, "msrp")
     
     def _extract_product_info(self, product: Dict[str, Any], product_id: Any) -> Dict[str, Any]:
         """Extract product information for embedding in offer items."""

@@ -8,6 +8,8 @@ from ..database import get_database
 from ..models.catalog import Catalog, CatalogCreate, CatalogUpdate
 from ..models.product import Product, ProductCreate
 from ..services.aws_service import aws_service
+from ..constants.catalog_headers import file_has_required_headers
+from ..exceptions import MissingCatalogHeadersError
 import logging
 
 logger = logging.getLogger(__name__)
@@ -30,8 +32,16 @@ class CatalogService:
         file_data: bytes,
         file_name: str
     ) -> Catalog:
-        """Create a new catalog and upload file to S3."""
+        """Create a new catalog and upload file to S3.
+        Validates required headers before uploading to S3; raises MissingCatalogHeadersError (405) if invalid.
+        """
         try:
+            # Validate file headers and parse line items BEFORE creating catalog or uploading to S3
+            logger.debug(f"create_catalog: starting parse for file '{file_name}' (size={len(file_data)} bytes) for user={user_id}")
+            line_items = await self._parse_catalog_file(file_data, file_name)
+            total_items = len(line_items)
+            logger.debug(f"create_catalog: parsed {total_items} line items for file '{file_name}'")
+
             # Create catalog document
             # Handle both Pydantic v1 and v2
             try:
@@ -50,33 +60,17 @@ class CatalogService:
             result = await self.db.catalogs.insert_one(catalog_dict)
             catalog_dict["_id"] = result.inserted_id
             
-            # Upload file to S3
+            # Upload file to S3 (only after validation passed)
             file_path = await aws_service.upload_file_to_s3(
                 file_data, file_name, user_id, str(result.inserted_id)
             )
             
             logger.info(f"Uploaded file to S3: {file_path}")
             
-            # Update catalog with S3 file path
-            update_result = await self.db.catalogs.update_one(
-                {"_id": result.inserted_id},
-                {"$set": {"file_path": file_path}}
-            )
-            
-            logger.info(f"Updated catalog with file_path: {update_result.modified_count} documents modified")
-            
-            # Verify the update
-            verify_catalog = await self.db.catalogs.find_one({"_id": result.inserted_id})
-            logger.info(f"Verification - file_path in DB: {verify_catalog.get('file_path') if verify_catalog else 'NOT FOUND'}")
-            
-            # Process file to count line items
-            line_items = await self._parse_catalog_file(file_data, file_name)
-            total_items = len(line_items)
-            
-            # Update catalog with item count
+            # Update catalog with S3 file path and item count
             await self.db.catalogs.update_one(
                 {"_id": result.inserted_id},
-                {"$set": {"total_items": total_items}}
+                {"$set": {"file_path": file_path, "total_items": total_items}}
             )
             
             # Fetch the updated catalog from database to ensure all fields are present
@@ -86,6 +80,8 @@ class CatalogService:
             else:
                 raise Exception("Failed to retrieve created catalog from database")
             
+        except MissingCatalogHeadersError:
+            raise
         except Exception as e:
             logger.error(f"Error creating catalog: {e}")
             raise Exception(f"Failed to create catalog: {e}")
@@ -178,16 +174,22 @@ class CatalogService:
     async def _parse_catalog_file(self, file_data: bytes, file_name: str) -> List[Dict[str, Any]]:
         """Parse catalog file and extract line items."""
         try:
+            logger.debug(f"_parse_catalog_file: detecting type for '{file_name}'")
             # Determine file type and parse accordingly
             if file_name.lower().endswith('.csv'):
+                logger.debug("_parse_catalog_file: detected CSV file")
                 return await self._parse_csv_file(file_data)
             elif file_name.lower().endswith('.json'):
+                logger.debug("_parse_catalog_file: detected JSON file")
                 return await self._parse_json_file(file_data)
             elif file_name.lower().endswith('.xlsx'):
+                logger.debug("_parse_catalog_file: detected Excel file")
                 return await self._parse_excel_file(file_data)
             else:
                 raise ValueError(f"Unsupported file format: {file_name}")
                 
+        except MissingCatalogHeadersError:
+            raise
         except Exception as e:
             logger.error(f"Error parsing catalog file: {e}")
             raise Exception(f"Failed to parse catalog file: {e}")
@@ -197,7 +199,23 @@ class CatalogService:
         try:
             text = file_data.decode('utf-8')
             csv_reader = csv.DictReader(io.StringIO(text))
+            
+            # Get headers (fieldnames) from the CSV reader
+            headers = csv_reader.fieldnames
+            if headers is None:
+                raise ValueError("CSV file has no headers")
+            logger.debug(f"_parse_csv_file: raw headers={headers}")
+
+            ok, missing = file_has_required_headers([h for h in headers if h])
+            if not ok:
+                raise MissingCatalogHeadersError(missing, file_type="CSV")
+            
             return [dict(row) for row in csv_reader]
+        except MissingCatalogHeadersError:
+            raise
+        except ValueError as e:
+            logger.error(f"CSV validation error: {e}")
+            raise
         except Exception as e:
             logger.error(f"Error parsing CSV file: {e}")
             raise Exception(f"Failed to parse CSV file: {e}")
@@ -230,6 +248,13 @@ class CatalogService:
             # Try to read the first sheet
             df = pd.read_excel(excel_data, sheet_name=0)
             
+            # Get headers (column names as in file)
+            headers = [str(col).strip() if col else "" for col in df.columns]
+            logger.debug(f"_parse_excel_file: raw headers={headers}")
+            ok, missing = file_has_required_headers(headers)
+            if not ok:
+                raise MissingCatalogHeadersError(missing, file_type="Excel")
+            
             # Convert DataFrame to list of dictionaries
             line_items = []
             for _, row in df.iterrows():
@@ -249,6 +274,11 @@ class CatalogService:
             logger.info(f"Successfully parsed Excel file with {len(line_items)} items")
             return line_items
             
+        except MissingCatalogHeadersError:
+            raise
+        except ValueError as e:
+            logger.error(f"Excel validation error: {e}")
+            raise
         except Exception as e:
             logger.error(f"Error parsing Excel file: {e}")
             raise Exception(f"Failed to parse Excel file: {e}")

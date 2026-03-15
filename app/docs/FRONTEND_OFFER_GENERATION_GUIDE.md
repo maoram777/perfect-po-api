@@ -1,11 +1,11 @@
 # Offer Generation Guide - Frontend Implementation
 
 ## Overview
-This guide explains how to implement PO score calculation, MSRP validation, and optimal offer generation in the React frontend application.
+This guide explains how to implement PO score calculation, profit calculation, and optimal offer generation in the React frontend application.
 
 ## Table of Contents
 1. [PO Score Calculation](#po-score-calculation)
-2. [MSRP Validation](#msrp-validation)
+2. [Profit Calculation](#profit-calculation)
 3. [Optimal Offer Creation](#optimal-offer-creation)
 4. [API Endpoints Reference](#api-endpoints-reference)
 5. [Example Implementation](#example-implementation)
@@ -111,15 +111,30 @@ const calculateProductPOScore = async (productId: string) => {
 
 ---
 
-## MSRP Validation
+## Profit Calculation
 
 ### Overview
-MSRP validation checks if the source MSRP is within 5% of the enriched price from Keepa/Amazon API. This helps eliminate invalid products from offers.
+Profit calculation determines the profitability of products based on offer price and cost of goods sold (COGS). This helps ensure only profitable products are included in offers.
+
+**Formula:**
+```
+Profit (as percentage) = (product_price - cogs - offer_price) / product_price
+COGS = product_price × 35%
+```
+
+Where:
+- **product_price**: Product price from enrichment provider (Keepa/Amazon)
+- **offer_price**: Offer price from input file columns "Offer" or "Offer Price"
+- **COGS Percentage**: Currently set to 35% (0.35)
+
+**Note:** Profit is returned as a decimal percentage (e.g., 0.15 = 15%). Multiply by 100 to display as percentage.
+
+Only products with `profit > 0` are eligible for offer generation.
 
 ### Endpoints
 
-#### 1. Validate MSRP for All Products
-**Endpoint:** `POST /products/validate-msrp`
+#### 1. Calculate Profit for All Products
+**Endpoint:** `POST /products/calculate-profit`
 
 **Query Parameters:**
 - `catalog_id` (optional): Filter by catalog ID
@@ -128,9 +143,9 @@ MSRP validation checks if the source MSRP is within 5% of the enriched price fro
 ```typescript
 {
   message: string;
-  validated: number;      // Products with msrp_validated = true
-  invalidated: number;    // Products with msrp_validated = false
-  skipped: number;        // Products that couldn't be validated
+  profitable: number;      // Products with profit > 0
+  unprofitable: number;    // Products with profit <= 0
+  skipped: number;          // Products that couldn't be calculated
   errors: number;
   total_processed: number;
 }
@@ -138,10 +153,10 @@ MSRP validation checks if the source MSRP is within 5% of the enriched price fro
 
 **Example:**
 ```typescript
-const validateMSRP = async (catalogId?: string) => {
+const calculateProfit = async (catalogId?: string) => {
   try {
     const params = catalogId ? `?catalog_id=${catalogId}` : '';
-    const response = await fetch(`/api/products/validate-msrp${params}`, {
+    const response = await fetch(`/api/products/calculate-profit${params}`, {
       method: 'POST',
       headers: {
         'Authorization': `Bearer ${token}`,
@@ -150,32 +165,54 @@ const validateMSRP = async (catalogId?: string) => {
     });
     
     const data = await response.json();
-    console.log(`Validated: ${data.validated}, Invalidated: ${data.invalidated}`);
+    console.log(`Profitable: ${data.profitable}, Unprofitable: ${data.unprofitable}`);
     return data;
   } catch (error) {
-    console.error('Error validating MSRP:', error);
+    console.error('Error calculating profit:', error);
     throw error;
   }
 };
 ```
 
-#### 2. Validate MSRP for Single Product
-**Endpoint:** `POST /products/{product_id}/validate-msrp`
+#### 2. Calculate Profit for Single Product
+**Endpoint:** `POST /products/{product_id}/calculate-profit`
 
 **Response:**
 ```typescript
 {
   product_id: string;
-  msrp_validated: boolean | null;
-  validation_details: {
-    source_msrp: number | null;
-    enriched_price: number | null;
-    delta_percent: number;
-    difference: number | null;
-    percentage_diff: number | null;
+  profit: number | null;
+  calculation_details: {
+    offer_price: number | null;
+    product_price: number | null;
+    cogs_percentage: number;  // 0.35 (35%)
+    cogs: number | null;
+    profit: number | null;  // Profit as decimal percentage (e.g., 0.15 = 15%)
+    profit_percentage: number | null;  // Profit as percentage (e.g., 15.0 = 15%)
   };
   message: string;
 }
+```
+
+**Example:**
+```typescript
+const calculateProductProfit = async (productId: string) => {
+  try {
+    const response = await fetch(`/api/products/${productId}/calculate-profit`, {
+      method: 'POST',
+      headers: {
+        'Authorization': `Bearer ${token}`,
+        'Content-Type': 'application/json'
+      }
+    });
+    
+    const data = await response.json();
+    return data;
+  } catch (error) {
+    console.error('Error calculating profit:', error);
+    throw error;
+  }
+};
 ```
 
 ---
@@ -203,13 +240,13 @@ interface ProductResponse {
   // ... other fields
   po_score: number | null;  // Purchase Order score (0-100)
   msrp: number | null;  // MSRP value from original data
-  msrp_validated: boolean | null;  // MSRP validation status (true/false/null)
+  profit: number | null;  // Profit percentage = (product_price - cogs - offer_price) / product_price (where cogs = product_price * 35%), as decimal (e.g., 0.15 = 15%)
   enrichment_status: string;
   // ... other fields
 }
 ```
 
-### Example: Display PO Score in Console
+### Example: Display PO Score and Profit in Console
 ```typescript
 const fetchProducts = async (catalogId: string) => {
   try {
@@ -222,12 +259,17 @@ const fetchProducts = async (catalogId: string) => {
     
     const products = await response.json();
     
-    // Display products with PO scores and MSRP status in console
+    // Display products with PO scores and profit in console
     products.forEach((product: any) => {
-      const msrpStatus = product.msrp_validated === true ? 'Validated' 
-                       : product.msrp_validated === false ? 'Invalid' 
-                       : 'Pending';
-      console.log(`${product.name}: PO Score = ${product.po_score ?? 'N/A'}, MSRP = $${product.msrp ?? 'N/A'}, MSRP Status = ${msrpStatus}`);
+      const profitStatus = product.profit !== null 
+        ? (product.profit > 0 ? 'Profitable' : 'Unprofitable')
+        : 'Pending';
+      const profitPercentage = product.profit !== null ? (product.profit * 100).toFixed(2) : 'N/A';
+      console.log(
+        `${product.name}: PO Score = ${product.po_score ?? 'N/A'}, ` +
+        `MSRP = $${product.msrp ?? 'N/A'}, ` +
+        `Profit = ${profitPercentage}% (${profitStatus})`
+      );
     });
     
     return products;
@@ -246,7 +288,7 @@ const fetchProducts = async (catalogId: string) => {
 Creates an optimal offer based on:
 - Investment amount (with 5% grace)
 - PO scores (higher is better)
-- MSRP validation (only validated products)
+- Profitability (only products with profit > 0)
 - Product variety (to reduce risk)
 - Available inventory
 
@@ -418,12 +460,12 @@ const OfferGeneration: React.FC<OfferGenerationProps> = ({ catalogId }) => {
     }
   };
 
-  // Step 2: Validate MSRP
-  const handleValidateMSRP = async () => {
+  // Step 2: Calculate Profit
+  const handleCalculateProfit = async () => {
     setLoading(true);
-    setStep('validating');
+    setStep('calculating');
     try {
-      const response = await fetch(`/api/products/validate-msrp?catalog_id=${catalogId}`, {
+      const response = await fetch(`/api/products/calculate-profit?catalog_id=${catalogId}`, {
         method: 'POST',
         headers: {
           'Authorization': `Bearer ${token}`,
@@ -432,10 +474,10 @@ const OfferGeneration: React.FC<OfferGenerationProps> = ({ catalogId }) => {
       });
       
       const data = await response.json();
-      console.log('MSRP validated:', data);
+      console.log('Profit calculated:', data);
       return data;
     } catch (error) {
-      console.error('Error validating MSRP:', error);
+      console.error('Error calculating profit:', error);
       throw error;
     } finally {
       setLoading(false);
@@ -487,8 +529,8 @@ const OfferGeneration: React.FC<OfferGenerationProps> = ({ catalogId }) => {
       await handleCalculatePOScores();
       await new Promise(resolve => setTimeout(resolve, 1000)); // Small delay
       
-      // Step 2: Validate MSRP
-      await handleValidateMSRP();
+      // Step 2: Calculate Profit
+      await handleCalculateProfit();
       await new Promise(resolve => setTimeout(resolve, 1000));
       
       // Step 3: Create offer
@@ -523,10 +565,10 @@ const OfferGeneration: React.FC<OfferGenerationProps> = ({ catalogId }) => {
         </button>
         
         <button 
-          onClick={handleValidateMSRP}
+          onClick={handleCalculateProfit}
           disabled={loading}
         >
-          {step === 'validating' ? 'Validating...' : '2. Validate MSRP'}
+          {step === 'calculating' ? 'Calculating...' : '2. Calculate Profit'}
         </button>
         
         <button 
@@ -586,17 +628,17 @@ export default OfferGeneration;
 - `POST /products/calculate-po-scores?catalog_id={id}` - Calculate for all products
 - `POST /products/{product_id}/calculate-po-score` - Calculate for single product
 
-### MSRP Validation
-- `POST /products/validate-msrp?catalog_id={id}` - Validate all products
-- `POST /products/{product_id}/validate-msrp` - Validate single product
+### Profit Calculation
+- `POST /products/calculate-profit?catalog_id={id}` - Calculate profit for all products
+- `POST /products/{product_id}/calculate-profit` - Calculate profit for single product
 
 ### Offer Creation
 - `POST /offers` - Create new offer (uses optimal generation algorithm)
 - `POST /offers/optimal` - Create optimal offer (legacy endpoint, same as POST /offers)
 
 ### Product Information
-- `GET /products` - Get all products (includes `po_score` field)
-- `GET /products/{product_id}` - Get single product (includes `po_score` field)
+- `GET /products` - Get all products (includes `po_score` and `profit` fields)
+- `GET /products/{product_id}` - Get single product (includes `po_score` and `profit` fields)
 
 ---
 
@@ -606,9 +648,9 @@ export default OfferGeneration;
 
 1. **No Eligible Products**
    ```
-   Error: "No eligible products found. Products must be enriched, have po_score, and msrp_validated=True"
+   Error: "No eligible products found. Products must be enriched, have po_score, and profit > 0"
    ```
-   **Solution:** Ensure products are enriched and validated before creating offers.
+   **Solution:** Ensure products are enriched, have PO scores calculated, and are profitable (profit > 0) before creating offers.
 
 2. **Investment Range Not Met**
    ```
@@ -620,7 +662,7 @@ export default OfferGeneration;
    ```
    Error: "PO score could not be calculated (missing required fields)"
    ```
-   **Solution:** Ensure products have WHS, MSRP, and Offer Price in original_data.
+   **Solution:** Ensure products have WHS, MSRP, and Offer Price in raw_data.
 
 ### Error Handling Example
 
@@ -660,19 +702,24 @@ const checkProductsReady = async (catalogId: string) => {
   
   const products = await response.json();
   
-  // Display PO scores and MSRP status in console
-  console.log('Products with PO Scores and MSRP Status:');
+  // Display PO scores and profit in console
+  console.log('Products with PO Scores and Profit:');
   products.forEach((p: any) => {
-    const msrpStatus = p.msrp_validated === true ? 'Validated' 
-                     : p.msrp_validated === false ? 'Invalid' 
-                     : 'Pending';
-    console.log(`${p.name}: PO Score = ${p.po_score ?? 'N/A'}, MSRP = $${p.msrp ?? 'N/A'}, MSRP Status = ${msrpStatus}`);
+    const profitStatus = p.profit !== null 
+      ? (p.profit > 0 ? 'Profitable' : 'Unprofitable')
+      : 'Pending';
+    console.log(
+      `${p.name}: PO Score = ${p.po_score ?? 'N/A'}, ` +
+      `MSRP = $${p.msrp ?? 'N/A'}, ` +
+      `Profit = $${p.profit?.toFixed(2) ?? 'N/A'} (${profitStatus})`
+    );
   });
   
   const enriched = products.filter((p: any) => 
     p.enrichment_status === 'completed' && 
     p.po_score !== null && 
-    p.msrp_validated === true
+    p.profit !== null &&
+    p.profit > 0
   );
   
   return {
@@ -776,10 +823,10 @@ interface POScoreCalculation {
   total_processed: number;
 }
 
-interface MSRPValidation {
+interface ProfitCalculation {
   message: string;
-  validated: number;
-  invalidated: number;
+  profitable: number;
+  unprofitable: number;
   skipped: number;
   errors: number;
   total_processed: number;
@@ -837,10 +884,10 @@ interface OptimalOfferResponse {
 
 ## Summary
 
-1. **View PO Scores**: PO scores are now available in all product API responses (`GET /products`)
+1. **View PO Scores and Profit**: PO scores and profit are now available in all product API responses (`GET /products`)
 2. **Calculate PO Scores**: Run before creating offers to ensure all products have scores
-3. **Validate MSRP**: Ensure only validated products are included in offers
-4. **Create Offer**: Use `POST /offers` to generate offer based on investment amount and constraints
+3. **Calculate Profit**: Run to determine product profitability (Profit percentage = (product_price - cogs - offer_price) / product_price, where cogs = product_price × 35%)
+4. **Create Offer**: Use `POST /offers` to generate offer based on investment amount and constraints (only includes products with profit > 0)
 5. **Handle Errors**: Provide user-friendly error messages
 6. **Show Progress**: Display workflow progress and results
 
@@ -848,7 +895,25 @@ interface OptimalOfferResponse {
 
 - ✅ **New Endpoint**: `POST /offers` is now the primary endpoint for creating offers
 - ✅ **PO Score Visibility**: `po_score` is included in all product API responses
+- ✅ **Profit Calculation**: `profit` field replaces `msrp_validated` - shows profitability based on offer price and COGS
+- ✅ **Profit-Based Filtering**: Only products with `profit > 0` are eligible for offer generation
 - ✅ **Backward Compatibility**: `POST /offers/optimal` still works but use `POST /offers` going forward
+
+## Profit Calculation Details
+
+**Formula:**
+```
+Profit (as percentage) = (product_price - cogs - offer_price) / product_price
+COGS = product_price × 35%
+```
+
+- **product_price**: Product price from enrichment provider (Keepa/Amazon)
+- **offer_price**: Extracted from input file columns "Offer" or "Offer Price"
+- **COGS Percentage**: Currently set to 35% (0.35)
+
+**Note:** Profit is returned as a decimal percentage (e.g., 0.15 = 15%). To display as percentage, multiply by 100.
+
+Only products with `profit > 0` are included in offers, ensuring all offers are profitable.
 
 For questions or issues, contact the backend team.
 

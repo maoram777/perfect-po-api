@@ -7,15 +7,19 @@ from .routers import auth, catalogs, enrichment, products, offers
 from .config import settings
 from app.services.catalog_service import CatalogService
 
-# Configure logging
+# Configure logging (DEBUG if settings.debug is True, otherwise INFO)
+_log_level = logging.DEBUG if settings.debug else logging.INFO
 logging.basicConfig(
-    level=logging.INFO,
+    level=_log_level,
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
     handlers=[
         logging.StreamHandler(),
         logging.FileHandler("app.log")
     ]
 )
+# Ensure app loggers show debug when DEBUG=true (uvicorn may set root to INFO)
+if settings.debug:
+    logging.getLogger("app").setLevel(logging.DEBUG)
 
 # Create FastAPI app
 app = FastAPI(

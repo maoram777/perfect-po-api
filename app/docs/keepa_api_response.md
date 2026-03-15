@@ -67,7 +67,11 @@ This document describes the Keepa API response structure and how it's processed 
 - Image URLs are constructed as: `https://m.media-amazon.com/images/I/{image_id}.jpg`
 
 ### Price and Availability
-- `csv` (array): Price history data
+- `csv` (array of arrays): Price history. Each inner array is `[ts0, price0, ts1, price1, ...]` where:
+  - `ts` = minutes since 2011-01-01 00:00:00 UTC (Keepa format)
+  - `price` = value in cents; `-1` means no data
+  - `csv[0]` = Amazon price history; the last pair is the most updated price
+- Convert Keepa minutes to Unix epoch: `epoch_seconds = (keepa_minutes + 21564000) * 60` (see `app/docs/keep_epoch.py`)
 - `availability` (integer): Product availability status
 - `isPrime` (boolean): Amazon Prime availability
 - `isAmazon` (boolean): Sold by Amazon
@@ -90,18 +94,14 @@ def process_keepa_images(images_csv: str) -> dict:
     }
 ```
 
-### Price Extraction
-```python
-def extract_keepa_price(product: dict) -> float:
-    """Extract current price from Keepa product data."""
-    price_history = product.get("csv", [])
-    if price_history and len(price_history) > 0:
-        # Get the most recent non-zero price
-        for price in reversed(price_history):
-            if price and price > 0:
-                return price / 100.0  # Keepa prices are in cents
-    return 0.0
-```
+### Price and Timestamp Extraction
+The most updated price is the last valid (timestamp, price) pair in `csv[0]`:
+- Iterate from the end of the first array; each pair is `(keepa_minutes, price_cents)`.
+- Use the last price that is not `-1` (no data); convert price from cents to dollars.
+- Convert that pair’s timestamp to Unix epoch seconds using `app/docs/keep_epoch.py`:  
+  `epoch_seconds = (keepa_minutes + 21564000) * 60`.
+
+The API stores both `price` (dollars) and `price_updated_at` (Unix epoch seconds) in the enriched product data.
 
 ### Category Mapping
 ```python

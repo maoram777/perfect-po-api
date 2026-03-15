@@ -1,5 +1,6 @@
 from fastapi import APIRouter, Depends, HTTPException, status, UploadFile, File, Form, Query
 from typing import List, Optional
+import asyncio
 from ..auth.dependencies import get_current_active_user
 from ..models.user import User
 from ..models.catalog import CatalogResponse, CatalogCreate, CatalogUpdate
@@ -7,6 +8,7 @@ from ..services.catalog_service import catalog_service
 from ..services.aws_service import aws_service
 from ..services.enrichment_service import local_enrichment_service
 from ..database import get_database
+from ..exceptions import MissingCatalogHeadersError
 from bson import ObjectId
 from datetime import datetime
 import logging
@@ -20,14 +22,41 @@ router = APIRouter(prefix="/catalogs", tags=["catalogs"])
 # If you need a simple catalog creation without file upload, you can uncomment and modify this
 
 
-@router.post("/upload")
+@router.post(
+    "/upload",
+    responses={
+        405: {
+            "description": "Missing required catalog headers",
+            "content": {
+                "application/json": {
+                    "example": {
+                        "detail": {
+                            "message": "Missing required catalog column headers. Add the following columns to your file (or use an accepted alias).",
+                            "missing_headers": ["sku", "offer_price"],
+                        }
+                    }
+                }
+            },
+        },
+    },
+)
 async def upload_catalog_file(
     file: UploadFile = File(...),
     name: str = Form(..., description="Catalog name"),
     description: Optional[str] = Form(None, description="Catalog description"),
     current_user: User = Depends(get_current_active_user)
 ):
-    """Upload a catalog file and create catalog."""
+    """Upload a catalog file (CSV or Excel) and create a catalog.
+
+    **Required file columns** (upload returns 405 if any are missing):
+    - `sku` (or SKU, Article Number, product_sku, etc.)
+    - `upc` (or UPC, barcode, ean, etc.)
+    - `quantity` (or Quantity, Inventory, qty, stock, etc.)
+    - `offer_price` (or Offer Price, offer, Price, price, selling_price, etc.)
+
+    See `GET /docs` or `CATALOG_INPUT_HEADERS.md` for full list of accepted column names.
+    On **405**, the response body includes `detail.missing_headers`: list of canonical names missing from the file.
+    """
     try:
         # Log incoming request data for debugging
         logger.info(f"Upload request received - User: {current_user.email}, Name: {name}, Description: {description}")
@@ -77,11 +106,21 @@ async def upload_catalog_file(
             "total_items": catalog.total_items
         }
         
+    except MissingCatalogHeadersError as e:
+        logger.error(f"Missing required catalog headers: {e.missing_headers}")
+        raise HTTPException(
+            status_code=status.HTTP_405_METHOD_NOT_ALLOWED,
+            detail={
+                "message": "Missing required catalog column headers. Add the following columns to your file (or use an accepted alias).",
+                "missing_headers": e.missing_headers,
+            },
+        )
     except ValueError as e:
-        logger.error(f"Validation error during upload: {e}")
+        error_message = str(e)
+        logger.error(f"Validation error: {error_message}")
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail=str(e)
+            detail=error_message
         )
     except HTTPException:
         # Re-raise HTTP exceptions as-is
@@ -274,7 +313,7 @@ async def get_catalog_summary(
         pipeline = [
             {"$match": {"catalog_id": ObjectId(catalog_id), "user_id": ObjectId(current_user.id)}},
             {"$group": {
-                "_id": "$enrichment_status",
+                "_id": "$enrichment.status",
                 "count": {"$sum": 1}
             }}
         ]
@@ -350,30 +389,34 @@ async def trigger_enrichment(
                 detail=f"Invalid provider: {provider}. Available providers: {', '.join(available_providers)}"
             )
         
-        # Use local enrichment service for immediate processing
+        # Spawn background task for enrichment (runs after HTTP response)
         try:
-            enrichment_result = await local_enrichment_service.enrich_catalog(
-                catalog_id=catalog_id,
-                user_id=str(current_user.id),
-                provider=provider
+            # Create background task that will continue after HTTP response closes
+            background_task = asyncio.create_task(
+                local_enrichment_service.enrich_catalog_products_background(
+                    catalog_id=catalog_id,
+                    user_id=str(current_user.id),
+                    provider=provider,
+                    bulk_size=50
+                )
             )
             
-            logger.info(f"Local enrichment completed for catalog {catalog_id} using {provider} provider")
+            # Don't await the task - let it run in background
+            logger.info(f"🚀 Background enrichment task spawned for catalog {catalog_id}")
+            
             return {
-                "message": "Enrichment process completed successfully",
+                "message": "Enrichment process started in background",
                 "catalog_id": catalog_id,
-                "total_items": enrichment_result["total_items"],
-                "enriched_items": enrichment_result["enriched_items"],
-                "failed_items": enrichment_result["failed_items"],
-                "status": enrichment_result["status"],
-                "provider": provider
+                "status": "processing",
+                "provider": provider,
+                "note": "Enrichment is running asynchronously. Check enrichment status using GET /catalogs/{catalog_id}/enrichment-status"
             }
             
         except Exception as e:
-            logger.error(f"Local enrichment failed: {e}")
+            logger.error(f"Failed to start background enrichment: {e}")
             raise HTTPException(
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                detail=f"Enrichment failed: {str(e)}"
+                detail=f"Failed to start enrichment: {str(e)}"
             )
         
     except HTTPException:

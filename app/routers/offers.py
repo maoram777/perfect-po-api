@@ -45,6 +45,19 @@ async def _convert_offer_items_to_response(items: List) -> List[Dict[str, Any]]:
     return items_response
 
 
+def _offer_total_cost(offer) -> Optional[float]:
+    """Compute total cost (amount customer pays) from offer items if not stored on offer."""
+    if getattr(offer, "total_cost", None) is not None:
+        return float(offer.total_cost)
+    if not offer.items:
+        return None
+    total = 0.0
+    for item in offer.items:
+        qty = item.quantity_required or 1
+        total += (item.offer_price or 0) * qty
+    return round(total, 2) if total else None
+
+
 class OptimalOfferRequest(BaseModel):
     catalog_id: str
     investment: float = Field(..., gt=0, description="Total investment amount")
@@ -71,7 +84,7 @@ async def create_offer(
     
     This is the main endpoint for creating offers. It uses the optimal offer generation
     algorithm that:
-    - Only includes products with msrp_validated=True and po_score
+    - Only includes products with profit > 0 and po_score
     - Considers product variety to reduce risk
     - Matches investment amount within grace_percent tolerance
     - Optimizes for best po_score values
@@ -116,6 +129,7 @@ async def create_offer(
             rules=offer.rules,
             total_discount=offer.total_discount,
             total_savings=offer.total_savings,
+            total_cost=getattr(offer, "total_cost", None) or _offer_total_cost(offer),
             offer_score=offer.offer_score,
             generation_method=offer.generation_method,
             created_at=offer.created_at,
@@ -149,7 +163,7 @@ async def create_optimal_offer(
     """Create an optimal offer based on investment amount.
     
     This endpoint generates an optimal offer that:
-    - Only includes products with msrp_validated=True and po_score
+    - Only includes products with profit > 0 and po_score
     - Considers product variety to reduce risk
     - Matches investment amount within grace_percent tolerance
     - Optimizes for best po_score values
@@ -181,6 +195,7 @@ async def create_optimal_offer(
             rules=offer.rules,
             total_discount=offer.total_discount,
             total_savings=offer.total_savings,
+            total_cost=getattr(offer, "total_cost", None) or _offer_total_cost(offer),
             offer_score=offer.offer_score,
             generation_method=offer.generation_method,
             created_at=offer.created_at,
@@ -241,6 +256,7 @@ async def generate_offers(
                 rules=offer.rules,
                 total_discount=offer.total_discount,
                 total_savings=offer.total_savings,
+                total_cost=getattr(offer, "total_cost", None) or _offer_total_cost(offer),
                 offer_score=offer.offer_score,
                 generation_method=offer.generation_method,
                 created_at=offer.created_at,
@@ -305,6 +321,7 @@ async def get_offers(
                 rules=offer.rules,
                 total_discount=offer.total_discount,
                 total_savings=offer.total_savings,
+                total_cost=getattr(offer, "total_cost", None) or _offer_total_cost(offer),
                 offer_score=offer.offer_score,
                 generation_method=offer.generation_method,
                 created_at=offer.created_at,
@@ -353,6 +370,7 @@ async def get_offer(
             rules=offer.rules,
             total_discount=offer.total_discount,
             total_savings=offer.total_savings,
+            total_cost=getattr(offer, "total_cost", None) or _offer_total_cost(offer),
             offer_score=offer.offer_score,
             generation_method=offer.generation_method,
             created_at=offer.created_at,
@@ -390,8 +408,7 @@ async def update_offer(
             )
         
         # Convert OfferItem to OfferItemResponse with product details
-        db = get_database()
-        items_response = await _convert_offer_items_to_response(updated_offer.items, db)
+        items_response = await _convert_offer_items_to_response(updated_offer.items)
         
         offer_response = OfferResponse(
             id=str(updated_offer.id),
@@ -406,6 +423,7 @@ async def update_offer(
             rules=updated_offer.rules,
             total_discount=updated_offer.total_discount,
             total_savings=updated_offer.total_savings,
+            total_cost=getattr(updated_offer, "total_cost", None) or _offer_total_cost(updated_offer),
             offer_score=updated_offer.offer_score,
             generation_method=updated_offer.generation_method,
             created_at=updated_offer.created_at,

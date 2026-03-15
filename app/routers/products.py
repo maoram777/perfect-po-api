@@ -6,6 +6,7 @@ from ..models.user import User
 from ..models.product import ProductResponse
 from ..database import get_database
 from ..services.enrichment_service import local_enrichment_service
+from ..constants.catalog_headers import get_numeric_value
 from bson import ObjectId
 import logging
 
@@ -33,7 +34,7 @@ async def get_products(
             filter_query["catalog_id"] = ObjectId(catalog_id)
         
         if enrichment_status:
-            filter_query["enrichment_status"] = enrichment_status
+            filter_query["enrichment.status"] = enrichment_status
         
         # Get products with pagination
         cursor = db.products.find(filter_query).skip(skip).limit(limit)
@@ -70,12 +71,37 @@ async def get_products(
                 else:
                     images = None
             
-            # Extract MSRP from original_data
-            original_data = product.get("original_data", {})
-            msrp = local_enrichment_service._extract_numeric_field(
-                original_data,
-                ["MSRP", "msrp", "Manufacturer Recommended Retail Price", "RRP", "rrp", "Retail Price", "retail_price", "list_price", "Original Price"]
-            )
+            # Extract MSRP from raw_data (see constants.catalog_headers)
+            raw_data = product.get("raw_data", {})
+            msrp = get_numeric_value(raw_data, "msrp")
+            
+            # Get profit from product (already calculated during enrichment)
+            # If not present, calculate it on the fly
+            profit = product.get("profit")
+            if profit is None:
+                offer_price = get_numeric_value(raw_data, "offer_price")
+                enrichment = product.get("enrichment", {})
+                enriched_data = enrichment.get("data", {}) if isinstance(enrichment, dict) else {}
+                # Get product_price from enrichment using standardized key
+                product_price = enriched_data.get("price")
+                
+                if offer_price is not None and product_price is not None:
+                    profit = local_enrichment_service.calculate_profit(offer_price, product_price, cogs_percentage=0.35)
+            
+            # Get enrichment data, handle both old and new structure for backward compatibility
+            enrichment_data = product.get("enrichment", {})
+            if not isinstance(enrichment_data, dict):
+                enrichment_data = {}
+            # Handle migration from old structure
+            if "enrichment_status" in product:
+                enrichment_data = {
+                    "source": product.get("enrichment_source"),
+                    "status": product.get("enrichment_status", "pending"),
+                    "errors": product.get("enrichment_errors", []),
+                    "data": product.get("enriched_data", {})
+                }
+            elif not enrichment_data:
+                enrichment_data = {"source": None, "status": "pending", "errors": [], "data": {}}
             
             product_response = ProductResponse(
                 id=str(product["_id"]),
@@ -90,15 +116,21 @@ async def get_products(
                 price=product.get("price"),
                 currency=product.get("currency", "USD"),
                 quantity=product.get("quantity"),
+                offer_price=product.get("offer_price"),  # Required field from CSV
                 unit=product.get("unit"),
                 main_image=main_image,
                 images=images,
                 color=color,  # Single color (with fallback from old 'colors' field)
                 size=product.get("size"),  # Size field
-                enrichment_status=product.get("enrichment_status", "pending"),
+                enrichment={
+                    "source": enrichment_data.get("source"),
+                    "status": enrichment_data.get("status", "pending"),
+                    "errors": enrichment_data.get("errors", []),
+                    "data": enrichment_data.get("data", {})
+                },
                 po_score=product.get("po_score"),  # Purchase Order score
-                msrp=msrp,  # MSRP value from original data
-                msrp_validated=product.get("msrp_validated"),  # MSRP validation status
+                msrp=msrp,  # MSRP value from raw_data
+                profit=profit,  # Profit percentage = (product_price - cogs - offer_price) / product_price (where cogs = product_price * 35%)
                 enriched_at=product.get("enriched_at"),
                 created_at=product.get("created_at", datetime.utcnow()),
                 updated_at=product.get("updated_at", datetime.utcnow())
@@ -167,12 +199,37 @@ async def get_product(
             else:
                 images = None
         
-        # Extract MSRP from original_data
-        original_data = product.get("original_data", {})
-        msrp = local_enrichment_service._extract_numeric_field(
-            original_data,
-            ["MSRP", "msrp", "Manufacturer Recommended Retail Price", "RRP", "rrp", "Retail Price", "retail_price", "list_price", "Original Price"]
-        )
+        # Extract MSRP from raw_data (see constants.catalog_headers)
+        raw_data = product.get("raw_data", {})
+        msrp = get_numeric_value(raw_data, "msrp")
+        
+        # Get profit from product (already calculated during enrichment)
+        # If not present, calculate it on the fly
+        profit = product.get("profit")
+        if profit is None:
+            offer_price = get_numeric_value(raw_data, "offer_price")
+            enrichment = product.get("enrichment", {})
+            enriched_data = enrichment.get("data", {}) if isinstance(enrichment, dict) else {}
+            # Get product_price from enrichment using standardized key
+            product_price = enriched_data.get("price")
+            
+            if offer_price is not None and product_price is not None:
+                profit = local_enrichment_service.calculate_profit(offer_price, product_price, cogs_percentage=0.35)
+        
+        # Get enrichment data, handle both old and new structure for backward compatibility
+        enrichment_data = product.get("enrichment", {})
+        if not isinstance(enrichment_data, dict):
+            enrichment_data = {}
+        # Handle migration from old structure
+        if "enrichment_status" in product:
+            enrichment_data = {
+                "source": product.get("enrichment_source"),
+                "status": product.get("enrichment_status", "pending"),
+                "errors": product.get("enrichment_errors", []),
+                "data": product.get("enriched_data", {})
+            }
+        elif not enrichment_data:
+            enrichment_data = {"source": None, "status": "pending", "errors": [], "data": {}}
         
         product_response = ProductResponse(
             id=str(product["_id"]),
@@ -187,15 +244,21 @@ async def get_product(
             price=product.get("price"),
             currency=product.get("currency", "USD"),
             quantity=product.get("quantity"),
+            offer_price=product.get("offer_price"),  # Required field from CSV
             unit=product.get("unit"),
             main_image=main_image,
             images=images,
             color=color,  # Single color (with fallback from old 'colors' field)
             size=product.get("size"),  # Size field
-            enrichment_status=product.get("enrichment_status", "pending"),
+            enrichment={
+                "source": enrichment_data.get("source"),
+                "status": enrichment_data.get("status", "pending"),
+                "errors": enrichment_data.get("errors", []),
+                "data": enrichment_data.get("data", {})
+            },
             po_score=product.get("po_score"),  # Purchase Order score
-            msrp=msrp,  # MSRP value from original data
-            msrp_validated=product.get("msrp_validated"),  # MSRP validation status
+            msrp=msrp,  # MSRP value from raw_data
+            profit=profit,  # Profit percentage = (product_price - cogs - offer_price) / product_price (where cogs = product_price * 35%)
             enriched_at=product.get("enriched_at"),
             created_at=product.get("created_at", datetime.utcnow()),
             updated_at=product.get("updated_at", datetime.utcnow())
@@ -240,7 +303,7 @@ async def get_catalog_products_summary(
         pipeline = [
             {"$match": {"catalog_id": ObjectId(catalog_id), "user_id": ObjectId(current_user.id)}},
             {"$group": {
-                "_id": "$enrichment_status",
+                "_id": "$enrichment.status",
                 "count": {"$sum": 1}
             }}
         ]
@@ -288,7 +351,7 @@ async def calculate_po_scores(
     """Calculate and update PO scores for products.
     
     This endpoint recalculates PO scores for products based on their whs, msrp, and offer prices
-    from the original_data. Can be run independently of the enrichment process.
+    from the raw_data. Can be run independently of the enrichment process.
     """
     try:
         db = get_database()
@@ -308,22 +371,11 @@ async def calculate_po_scores(
         
         async for product in cursor:
             try:
-                # Extract pricing fields from original_data
-                original_data = product.get("original_data", {})
-                
-                # Extract numeric fields using the enrichment service method
-                whs = local_enrichment_service._extract_numeric_field(
-                    original_data, 
-                    ["WHS", "whs", "Warehouse Price", "warehouse_price", "warehouse", "cost_price"]
-                )
-                msrp = local_enrichment_service._extract_numeric_field(
-                    original_data, 
-                    ["MSRP", "msrp", "Manufacturer Recommended Retail Price", "RRP", "rrp", "Retail Price", "retail_price", "list_price"]
-                )
-                offer = local_enrichment_service._extract_numeric_field(
-                    original_data, 
-                    ["Offer Price", "offer_price", "offer", "Offer", "Price", "price", "selling_price"]
-                )
+                # Extract pricing fields from raw_data (see constants.catalog_headers)
+                raw_data = product.get("raw_data", {})
+                whs = get_numeric_value(raw_data, "whs")
+                msrp = get_numeric_value(raw_data, "msrp")
+                offer = get_numeric_value(raw_data, "offer_price")
                 
                 # Calculate PO score
                 po_score = local_enrichment_service.calculate_po_score(whs, msrp, offer)
@@ -387,22 +439,11 @@ async def calculate_product_po_score(
                 detail="Product not found"
             )
         
-        # Extract pricing fields from original_data
-        original_data = product.get("original_data", {})
-        
-        # Extract numeric fields using the enrichment service method
-        whs = local_enrichment_service._extract_numeric_field(
-            original_data, 
-            ["WHS", "whs", "Warehouse Price", "warehouse_price", "warehouse", "cost_price"]
-        )
-        msrp = local_enrichment_service._extract_numeric_field(
-            original_data, 
-            ["MSRP", "msrp", "Manufacturer Recommended Retail Price", "RRP", "rrp", "Retail Price", "retail_price", "list_price"]
-        )
-        offer = local_enrichment_service._extract_numeric_field(
-            original_data, 
-            ["Offer Price", "offer_price", "offer", "Offer", "Price", "price", "selling_price"]
-        )
+        # Extract pricing fields from raw_data (see constants.catalog_headers)
+        raw_data = product.get("raw_data", {})
+        whs = get_numeric_value(raw_data, "whs")
+        msrp = get_numeric_value(raw_data, "msrp")
+        offer = get_numeric_value(raw_data, "offer_price")
         
         # Calculate PO score
         po_score = local_enrichment_service.calculate_po_score(whs, msrp, offer)
@@ -441,15 +482,18 @@ async def calculate_product_po_score(
         )
 
 
-@router.post("/validate-msrp")
-async def validate_msrp_scores(
-    catalog_id: Optional[str] = Query(None, description="Validate MSRP for products in a specific catalog"),
+@router.post("/calculate-profit")
+async def calculate_profit_scores(
+    catalog_id: Optional[str] = Query(None, description="Calculate profit for products in a specific catalog"),
     current_user: User = Depends(get_current_active_user)
 ):
-    """Re-validate MSRP for products against enriched prices.
+    """Recalculate profit percentage for products based on product price, COGS, and offer price.
     
-    This endpoint re-validates MSRP for products based on their source MSRP and enriched prices
-    from the enriched_data. Can be run independently to update validation status.
+    Profit (as percentage) = (product_price - cogs - offer_price) / product_price
+    COGS = product_price * 35% (default)
+    
+    This endpoint recalculates profit for products based on their offer price from input file
+    and product_price from enrichment data (Keepa/Amazon). Can be run independently to update profit values.
     """
     try:
         db = get_database()
@@ -463,84 +507,79 @@ async def validate_msrp_scores(
         # Get all products matching the filter
         cursor = db.products.find(filter_query)
         
-        validated_count = 0
-        invalidated_count = 0
+        profitable_count = 0
+        unprofitable_count = 0
         skipped_count = 0
         error_count = 0
         
         async for product in cursor:
             try:
-                # Extract MSRP from original_data
-                original_data = product.get("original_data", {})
-                msrp = local_enrichment_service._extract_numeric_field(
-                    original_data, 
-                    ["MSRP", "msrp", "Manufacturer Recommended Retail Price", "RRP", "rrp", "Retail Price", "retail_price", "list_price"]
-                )
+                # Extract offer price from raw_data (see constants.catalog_headers)
+                raw_data = product.get("raw_data", {})
+                offer_price = get_numeric_value(raw_data, "offer_price")
                 
-                # Get enriched price from enriched_data
-                enriched_data = product.get("enriched_data", {})
-                enrichment_source = product.get("enrichment_source", "")
+                # Get product_price from enrichment using standardized key
+                enrichment = product.get("enrichment", {})
+                enriched_data = enrichment.get("data", {}) if isinstance(enrichment, dict) else {}
+                product_price = enriched_data.get("price")
                 
-                enriched_price = None
-                if "keepa" in enrichment_source.lower():
-                    enriched_price = enriched_data.get("keepa_price")
-                elif "amazon" in enrichment_source.lower():
-                    enriched_price = enriched_data.get("amazon_price")
-                else:
-                    # Try both if source is unknown
-                    enriched_price = enriched_data.get("keepa_price") or enriched_data.get("amazon_price")
+                # Calculate profit percentage: (product_price - cogs - offer_price) / product_price
+                # COGS = product_price * 0.35 (35%)
+                profit = local_enrichment_service.calculate_profit(offer_price, product_price, cogs_percentage=0.35)
                 
-                # Validate MSRP (within 5% delta)
-                msrp_validated = local_enrichment_service.validate_msrp(msrp, enriched_price, delta_percent=5.0)
-                
-                # Update product with validation result
+                # Update product with profit result
                 await db.products.update_one(
                     {"_id": product["_id"]},
                     {
                         "$set": {
-                            "msrp_validated": msrp_validated,
+                            "profit": profit,
                             "updated_at": datetime.utcnow()
                         }
                     }
                 )
                 
-                if msrp_validated is True:
-                    validated_count += 1
-                elif msrp_validated is False:
-                    invalidated_count += 1
+                if profit is not None:
+                    if profit > 0:
+                        profitable_count += 1
+                    else:
+                        unprofitable_count += 1
                 else:
                     skipped_count += 1
                     
             except Exception as e:
-                logger.error(f"Error validating MSRP for product {product.get('_id')}: {e}")
+                logger.error(f"Error calculating profit for product {product.get('_id')}: {e}")
                 error_count += 1
                 continue
         
         return {
-            "message": "MSRP validation completed",
-            "validated": validated_count,
-            "invalidated": invalidated_count,
+            "message": "Profit calculation completed",
+            "profitable": profitable_count,
+            "unprofitable": unprofitable_count,
             "skipped": skipped_count,
             "errors": error_count,
-            "total_processed": validated_count + invalidated_count + skipped_count + error_count
+            "total_processed": profitable_count + unprofitable_count + skipped_count + error_count
         }
         
     except Exception as e:
-        logger.error(f"Error validating MSRP: {e}")
+        logger.error(f"Error calculating profit: {e}")
         import traceback
         logger.error(f"Traceback: {traceback.format_exc()}")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Failed to validate MSRP: {str(e)}"
+            detail=f"Failed to calculate profit: {str(e)}"
         )
 
 
-@router.post("/{product_id}/validate-msrp")
-async def validate_product_msrp(
+@router.post("/{product_id}/calculate-profit")
+async def calculate_product_profit(
     product_id: str,
     current_user: User = Depends(get_current_active_user)
 ):
-    """Re-validate MSRP for a specific product."""
+    """Recalculate profit percentage for a specific product.
+    
+    Profit (as percentage) = (product_price - cogs - offer_price) / product_price
+    COGS = product_price * 35% (default)
+    """
     try:
         db = get_database()
         
@@ -555,62 +594,56 @@ async def validate_product_msrp(
                 detail="Product not found"
             )
         
-        # Extract MSRP from original_data
-        original_data = product.get("original_data", {})
-        msrp = local_enrichment_service._extract_numeric_field(
-            original_data, 
-            ["MSRP", "msrp", "Manufacturer Recommended Retail Price", "RRP", "rrp", "Retail Price", "retail_price", "list_price"]
-        )
+        # Extract offer price from raw_data (see constants.catalog_headers)
+        raw_data = product.get("raw_data", {})
+        offer_price = get_numeric_value(raw_data, "offer_price")
         
-        # Get enriched price from enriched_data
-        enriched_data = product.get("enriched_data", {})
-        enrichment_source = product.get("enrichment_source", "")
+        # Get product_price from enrichment using standardized key
+        enrichment = product.get("enrichment", {})
+        enriched_data = enrichment.get("data", {}) if isinstance(enrichment, dict) else {}
+        product_price = enriched_data.get("price")
         
-        enriched_price = None
-        if "keepa" in enrichment_source.lower():
-            enriched_price = enriched_data.get("keepa_price")
-        elif "amazon" in enrichment_source.lower():
-            enriched_price = enriched_data.get("amazon_price")
-        else:
-            # Try both if source is unknown
-            enriched_price = enriched_data.get("keepa_price") or enriched_data.get("amazon_price")
+        # Calculate profit percentage: (product_price - cogs - offer_price) / product_price
+        # COGS = product_price * 0.35 (35%)
+        profit = local_enrichment_service.calculate_profit(offer_price, product_price, cogs_percentage=0.35)
         
-        # Validate MSRP (within 5% delta)
-        msrp_validated = local_enrichment_service.validate_msrp(msrp, enriched_price, delta_percent=5.0)
-        
-        # Update product with validation result
+        # Update product with profit result
         await db.products.update_one(
             {"_id": ObjectId(product_id)},
             {
                 "$set": {
-                    "msrp_validated": msrp_validated,
+                    "profit": profit,
                     "updated_at": datetime.utcnow()
                 }
             }
         )
         
+        # Calculate COGS for response
+        cogs = product_price * 0.35 if product_price is not None else None
+        
         return {
             "product_id": product_id,
-            "msrp_validated": msrp_validated,
-            "validation_details": {
-                "source_msrp": msrp,
-                "enriched_price": enriched_price,
-                "delta_percent": 5.0,
-                "difference": abs(msrp - enriched_price) if msrp and enriched_price else None,
-                "percentage_diff": (abs(msrp - enriched_price) / enriched_price * 100) if msrp and enriched_price and enriched_price > 0 else None
+            "profit": profit,  # Profit as percentage (decimal, e.g., 0.15 = 15%)
+            "calculation_details": {
+                "offer_price": offer_price,
+                "product_price": product_price,
+                "cogs_percentage": 0.35,
+                "cogs": cogs,
+                "profit": profit,
+                "profit_percentage": profit * 100 if profit is not None else None  # As percentage (e.g., 15.0 = 15%)
             },
-            "message": "MSRP validated" if msrp_validated is not None else "MSRP validation could not be performed (missing required fields)"
+            "message": "Profit calculated" if profit is not None else "Profit could not be calculated (missing required fields)"
         }
         
     except HTTPException:
         raise
     except Exception as e:
-        logger.error(f"Error validating MSRP for product {product_id}: {e}")
+        logger.error(f"Error calculating profit for product {product_id}: {e}")
         import traceback
         logger.error(f"Traceback: {traceback.format_exc()}")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Failed to validate MSRP: {str(e)}"
+            detail=f"Failed to calculate profit: {str(e)}"
         )
 
 
