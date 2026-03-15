@@ -6,6 +6,7 @@ from ..models.user import User
 from ..models.product import ProductResponse
 from ..database import get_database
 from ..services.enrichment_service import local_enrichment_service
+from ..constants.catalog_headers import get_numeric_value
 from bson import ObjectId
 import logging
 
@@ -70,22 +71,15 @@ async def get_products(
                 else:
                     images = None
             
-            # Extract MSRP from raw_data
+            # Extract MSRP from raw_data (see constants.catalog_headers)
             raw_data = product.get("raw_data", {})
-            msrp = local_enrichment_service._extract_numeric_field(
-                raw_data,
-                ["MSRP", "msrp", "Manufacturer Recommended Retail Price", "RRP", "rrp", "Retail Price", "retail_price", "list_price", "Original Price"]
-            )
+            msrp = get_numeric_value(raw_data, "msrp")
             
             # Get profit from product (already calculated during enrichment)
             # If not present, calculate it on the fly
             profit = product.get("profit")
             if profit is None:
-                # Calculate profit if not already stored
-                offer_price = local_enrichment_service._extract_numeric_field(
-                    raw_data,
-                    ["Offer Price", "offer_price", "offer", "Offer", "Price", "price", "selling_price"]
-                )
+                offer_price = get_numeric_value(raw_data, "offer_price")
                 enrichment = product.get("enrichment", {})
                 enriched_data = enrichment.get("data", {}) if isinstance(enrichment, dict) else {}
                 # Get product_price from enrichment using standardized key
@@ -205,22 +199,15 @@ async def get_product(
             else:
                 images = None
         
-        # Extract MSRP from raw_data
+        # Extract MSRP from raw_data (see constants.catalog_headers)
         raw_data = product.get("raw_data", {})
-        msrp = local_enrichment_service._extract_numeric_field(
-            raw_data,
-            ["MSRP", "msrp", "Manufacturer Recommended Retail Price", "RRP", "rrp", "Retail Price", "retail_price", "list_price", "Original Price"]
-        )
+        msrp = get_numeric_value(raw_data, "msrp")
         
         # Get profit from product (already calculated during enrichment)
         # If not present, calculate it on the fly
         profit = product.get("profit")
         if profit is None:
-            # Calculate profit if not already stored
-            offer_price = local_enrichment_service._extract_numeric_field(
-                raw_data,
-                ["Offer Price", "offer_price", "offer", "Offer", "Price", "price", "selling_price"]
-            )
+            offer_price = get_numeric_value(raw_data, "offer_price")
             enrichment = product.get("enrichment", {})
             enriched_data = enrichment.get("data", {}) if isinstance(enrichment, dict) else {}
             # Get product_price from enrichment using standardized key
@@ -384,22 +371,11 @@ async def calculate_po_scores(
         
         async for product in cursor:
             try:
-                # Extract pricing fields from raw_data
+                # Extract pricing fields from raw_data (see constants.catalog_headers)
                 raw_data = product.get("raw_data", {})
-                
-                # Extract numeric fields using the enrichment service method
-                whs = local_enrichment_service._extract_numeric_field(
-                    raw_data, 
-                    ["WHS", "whs", "Warehouse Price", "warehouse_price", "warehouse", "cost_price"]
-                )
-                msrp = local_enrichment_service._extract_numeric_field(
-                    raw_data, 
-                    ["MSRP", "msrp", "Manufacturer Recommended Retail Price", "RRP", "rrp", "Retail Price", "retail_price", "list_price"]
-                )
-                offer = local_enrichment_service._extract_numeric_field(
-                    raw_data, 
-                    ["Offer Price", "offer_price", "offer", "Offer", "Price", "price", "selling_price"]
-                )
+                whs = get_numeric_value(raw_data, "whs")
+                msrp = get_numeric_value(raw_data, "msrp")
+                offer = get_numeric_value(raw_data, "offer_price")
                 
                 # Calculate PO score
                 po_score = local_enrichment_service.calculate_po_score(whs, msrp, offer)
@@ -463,22 +439,11 @@ async def calculate_product_po_score(
                 detail="Product not found"
             )
         
-        # Extract pricing fields from raw_data
+        # Extract pricing fields from raw_data (see constants.catalog_headers)
         raw_data = product.get("raw_data", {})
-        
-        # Extract numeric fields using the enrichment service method
-        whs = local_enrichment_service._extract_numeric_field(
-            raw_data, 
-            ["WHS", "whs", "Warehouse Price", "warehouse_price", "warehouse", "cost_price"]
-        )
-        msrp = local_enrichment_service._extract_numeric_field(
-            raw_data, 
-            ["MSRP", "msrp", "Manufacturer Recommended Retail Price", "RRP", "rrp", "Retail Price", "retail_price", "list_price"]
-        )
-        offer = local_enrichment_service._extract_numeric_field(
-            raw_data, 
-            ["Offer Price", "offer_price", "offer", "Offer", "Price", "price", "selling_price"]
-        )
+        whs = get_numeric_value(raw_data, "whs")
+        msrp = get_numeric_value(raw_data, "msrp")
+        offer = get_numeric_value(raw_data, "offer_price")
         
         # Calculate PO score
         po_score = local_enrichment_service.calculate_po_score(whs, msrp, offer)
@@ -549,12 +514,9 @@ async def calculate_profit_scores(
         
         async for product in cursor:
             try:
-                # Extract offer price from raw_data
+                # Extract offer price from raw_data (see constants.catalog_headers)
                 raw_data = product.get("raw_data", {})
-                offer_price = local_enrichment_service._extract_numeric_field(
-                    raw_data, 
-                    ["Offer Price", "offer_price", "offer", "Offer", "Price", "price", "selling_price"]
-                )
+                offer_price = get_numeric_value(raw_data, "offer_price")
                 
                 # Get product_price from enrichment using standardized key
                 enrichment = product.get("enrichment", {})
@@ -632,15 +594,13 @@ async def calculate_product_profit(
                 detail="Product not found"
             )
         
-        # Extract offer price from raw_data
+        # Extract offer price from raw_data (see constants.catalog_headers)
         raw_data = product.get("raw_data", {})
-        offer_price = local_enrichment_service._extract_numeric_field(
-            raw_data, 
-            ["Offer Price", "offer_price", "offer", "Offer", "Price", "price", "selling_price"]
-        )
+        offer_price = get_numeric_value(raw_data, "offer_price")
         
         # Get product_price from enrichment using standardized key
-        enriched_data = product.get("enriched_data", {})
+        enrichment = product.get("enrichment", {})
+        enriched_data = enrichment.get("data", {}) if isinstance(enrichment, dict) else {}
         product_price = enriched_data.get("price")
         
         # Calculate profit percentage: (product_price - cogs - offer_price) / product_price

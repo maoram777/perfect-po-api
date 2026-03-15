@@ -8,6 +8,7 @@ from ..services.catalog_service import catalog_service
 from ..services.aws_service import aws_service
 from ..services.enrichment_service import local_enrichment_service
 from ..database import get_database
+from ..exceptions import MissingCatalogHeadersError
 from bson import ObjectId
 from datetime import datetime
 import logging
@@ -21,14 +22,41 @@ router = APIRouter(prefix="/catalogs", tags=["catalogs"])
 # If you need a simple catalog creation without file upload, you can uncomment and modify this
 
 
-@router.post("/upload")
+@router.post(
+    "/upload",
+    responses={
+        405: {
+            "description": "Missing required catalog headers",
+            "content": {
+                "application/json": {
+                    "example": {
+                        "detail": {
+                            "message": "Missing required catalog column headers. Add the following columns to your file (or use an accepted alias).",
+                            "missing_headers": ["sku", "offer_price"],
+                        }
+                    }
+                }
+            },
+        },
+    },
+)
 async def upload_catalog_file(
     file: UploadFile = File(...),
     name: str = Form(..., description="Catalog name"),
     description: Optional[str] = Form(None, description="Catalog description"),
     current_user: User = Depends(get_current_active_user)
 ):
-    """Upload a catalog file and create catalog."""
+    """Upload a catalog file (CSV or Excel) and create a catalog.
+
+    **Required file columns** (upload returns 405 if any are missing):
+    - `sku` (or SKU, Article Number, product_sku, etc.)
+    - `upc` (or UPC, barcode, ean, etc.)
+    - `quantity` (or Quantity, Inventory, qty, stock, etc.)
+    - `offer_price` (or Offer Price, offer, Price, price, selling_price, etc.)
+
+    See `GET /docs` or `CATALOG_INPUT_HEADERS.md` for full list of accepted column names.
+    On **405**, the response body includes `detail.missing_headers`: list of canonical names missing from the file.
+    """
     try:
         # Log incoming request data for debugging
         logger.info(f"Upload request received - User: {current_user.email}, Name: {name}, Description: {description}")
@@ -78,15 +106,17 @@ async def upload_catalog_file(
             "total_items": catalog.total_items
         }
         
+    except MissingCatalogHeadersError as e:
+        logger.error(f"Missing required catalog headers: {e.missing_headers}")
+        raise HTTPException(
+            status_code=status.HTTP_405_METHOD_NOT_ALLOWED,
+            detail={
+                "message": "Missing required catalog column headers. Add the following columns to your file (or use an accepted alias).",
+                "missing_headers": e.missing_headers,
+            },
+        )
     except ValueError as e:
         error_message = str(e)
-        # Check if error is about missing required headers
-        if "Missing required" in error_message and "headers" in error_message:
-            logger.error(f"Missing required CSV headers: {error_message}")
-            raise HTTPException(
-                status_code=status.HTTP_405_METHOD_NOT_ALLOWED,
-                detail=error_message
-            )
         logger.error(f"Validation error: {error_message}")
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,

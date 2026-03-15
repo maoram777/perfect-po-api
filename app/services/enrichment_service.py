@@ -1,4 +1,5 @@
 import asyncio
+import copy
 import logging
 from typing import Dict, Any, List, Optional
 from datetime import datetime
@@ -9,6 +10,7 @@ from ..models.product import Product, ProductCreate
 from ..models.catalog import Catalog
 from ..config import settings
 from ..services.aws_service import aws_service
+from ..constants.catalog_headers import get_value, get_numeric_value
 import json
 
 logger = logging.getLogger(__name__)
@@ -157,20 +159,13 @@ class KeepaAPIProvider(EnrichmentProvider):
             }
     
     def _extract_upc(self, item_data: Dict[str, Any]) -> Optional[str]:
-        """Extract UPC from item data."""
-        # Common UPC field names from CSV
-        upc_fields = ["UPC", "upc", "UPC Code", "upc_code", "product_upc", "item_upc", "barcode"]
-        
-        for field in upc_fields:
-            upc_value = item_data.get(field)
-            if upc_value:
-                # Clean the UPC value (remove spaces, ensure it's a string)
-                upc_str = str(upc_value).strip()
-                # Remove any non-digit characters if present
-                upc_clean = ''.join(filter(str.isdigit, upc_str))
-                if upc_clean:
-                    return upc_clean
-        
+        """Extract UPC from item data using canonical catalog headers."""
+        upc_value = get_value(item_data, "upc")
+        if upc_value:
+            upc_str = str(upc_value).strip()
+            upc_clean = "".join(filter(str.isdigit, upc_str))
+            if upc_clean:
+                return upc_clean
         return None
     
     async def enrich_by_identifier(
@@ -245,6 +240,79 @@ class KeepaAPIProvider(EnrichmentProvider):
                 "enriched_at": datetime.utcnow()
             }
     
+    def _normalize_upc(self, upc: str) -> str:
+        """Return digits-only UPC for matching."""
+        if not upc:
+            return ""
+        return "".join(filter(str.isdigit, str(upc)))
+
+    async def _call_keepa_api_bulk_codes(self, codes: List[str]) -> Dict[str, Dict[str, Any]]:
+        """Call Keepa API with up to 50 UPC/EAN codes in a single request.
+        
+        Args:
+            codes: List of UPC/EAN strings (up to 50).
+        
+        Returns:
+            Dict mapping request UPC (digits-only) to standardized enriched data.
+        """
+        if not self.api_key:
+            logger.error("Keepa API - No API key configured, cannot make bulk call")
+            return {}
+        codes = [c for c in codes if c]
+        if not codes:
+            return {}
+        if len(codes) > 50:
+            logger.warning(f"Keepa API - Bulk codes limited to 50, got {len(codes)}, using first 50")
+            codes = codes[:50]
+        code_string = ",".join(codes)
+        try:
+            async with httpx.AsyncClient() as client:
+                product_url = f"{self.base_url}/product"
+                params = {
+                    "key": self.api_key,
+                    "domain": 1,
+                    "code": code_string,
+                }
+                headers = {"User-Agent": "Perfect-PO-API/1.0"}
+                response = await client.get(product_url, params=params, headers=headers, timeout=90.0)
+                response.raise_for_status()
+                product_data = response.json()
+                raw_products = product_data.get("products", [])
+                # Map response products back to request UPCs by matching upcList/eanList
+                result = {}
+                assigned_request_upcs = set()
+                for detailed in raw_products:
+                    upc_list = detailed.get("upcList") or []
+                    ean_list = detailed.get("eanList") or []
+                    product_codes = {self._normalize_upc(str(x)) for x in upc_list + ean_list if x}
+                    matched_request_upc = None
+                    for req in codes:
+                        n = self._normalize_upc(req)
+                        if not n or n in assigned_request_upcs:
+                            continue
+                        if n in product_codes:
+                            matched_request_upc = n
+                            break
+                        if any(n == c or n.endswith(c) or c.endswith(n) for c in product_codes):
+                            matched_request_upc = n
+                            break
+                    if not matched_request_upc:
+                        for n in (self._normalize_upc(c) for c in codes):
+                            if n and n not in assigned_request_upcs:
+                                matched_request_upc = n
+                                break
+                    if matched_request_upc:
+                        assigned_request_upcs.add(matched_request_upc)
+                        processed = self._process_keepa_product_response(
+                            detailed, identifier=matched_request_upc, identifier_type="upc"
+                        )
+                        result[matched_request_upc] = processed
+                logger.info(f"Keepa API - Bulk codes returned {len(result)} products for {len(codes)} request codes")
+                return result
+        except Exception as e:
+            logger.error(f"Keepa API bulk codes error: {e}")
+            return {}
+
     async def _call_keepa_api_bulk_by_asin(self, asins: List[str]) -> Dict[str, Dict[str, Any]]:
         """Call Keepa API to get product information for multiple ASINs in bulk.
         
@@ -512,7 +580,7 @@ class KeepaAPIProvider(EnrichmentProvider):
                 main_image = images[0]
         
         # Fallback to imagesCSV
-        if not images and detailed_product.get("imag    to esCSV"):
+        if not images and detailed_product.get("imagesCSV"):
             image_ids = [img_id.strip() for img_id in detailed_product["imagesCSV"].split(",") if img_id.strip()]
             for img_id in image_ids:
                 if not img_id.endswith('.jpg') and not img_id.endswith('.png'):
@@ -531,10 +599,20 @@ class KeepaAPIProvider(EnrichmentProvider):
             rating = detailed_product.get("rating")
             review_count = detailed_product.get("reviewCount", 0)
         
+        # Price from csv[0]: array of [timestamp, price, timestamp, price, ...]; last pair = most updated
+        # price_updated_at = that timestamp converted to Unix epoch (see app/docs/keep_epoch.py)
+        price, price_updated_at = self._extract_keepa_price_and_timestamp(detailed_product)
+        
+        # availabilityAmazon: -1 = not available, 0 = available (Keepa convention)
+        availability_amazon_raw = detailed_product.get("availabilityAmazon")
+        available_amazon = availability_amazon_raw == 0 if availability_amazon_raw is not None else None
+        
         # Build response data with standardized keys (no source prefix)
         response_data = {
             "product_id": detailed_product.get("asin", ""),
-            "price": self._extract_keepa_price(detailed_product),
+            "price": price,
+            "price_updated_at": price_updated_at,
+            "available_amazon": available_amazon,
             "rating": rating,
             "review_count": review_count,
             "category": category,
@@ -591,9 +669,9 @@ class KeepaAPIProvider(EnrichmentProvider):
                     "key": self.api_key,
                     "domain": 1,  # Hardcoded to Amazon.com (US marketplace) per docs
                     "code": upc,  # UPC/EAN code from CSV
-                    "images": 1,  # Include image data (per docs)
-                    "history": 0,  # Don't include price history (per docs)
-                    "offers": 0   # Don't include offer data (per docs)
+                    # "images": 1,  # Include image data (per docs)
+                    # "history": 0,  # Don't include price history (per docs)
+                    # "offers": 0   # Don't include offer data (per docs)
                 }
                 
                 logger.info(f"Keepa API - Making product request to: {product_url}")
@@ -656,6 +734,8 @@ class KeepaAPIProvider(EnrichmentProvider):
         return {
             "product_id": f"KPA_{hash(upc) % 1000000}",
             "price": 89.99,
+            "price_updated_at": int(datetime.utcnow().timestamp()),
+            "available_amazon": True,
             "rating": 4.3,
             "review_count": 980,
             "category": "Electronics",
@@ -674,43 +754,42 @@ class KeepaAPIProvider(EnrichmentProvider):
             "upc_list": [upc]
         }
     
-    def _extract_keepa_price(self, product: Dict[str, Any]) -> Optional[float]:
-        """Extract current price from Keepa product data.
-        
-        According to Keepa API documentation and actual response structure:
-        - The csv array contains multiple arrays, each representing different data types
-        - Index 0: Amazon price history as [timestamp, price, timestamp, price, ...]
-        - Index 1: New price history (same format)
-        - Prices are stored in cents, -1 means no data available
-        - We want the most recent price from the Amazon price history (index 0)
+    @staticmethod
+    def _keepa_minutes_to_epoch_seconds(keepa_minutes: Optional[int]) -> Optional[int]:
+        """Convert Keepa time (minutes since 2011-01-01 UTC) to Unix epoch seconds.
+        See app/docs/keep_epoch.py for the formula explanation.
+        """
+        if keepa_minutes is None:
+            return None
+        return (int(keepa_minutes) + 21564000) * 60
+
+    def _extract_keepa_price_and_timestamp(
+        self, product: Dict[str, Any]
+    ) -> tuple:
+        """Extract the most updated price and its timestamp from Keepa csv field.
+        csv is array of arrays; csv[0] = Amazon price history: [ts0, price0, ts1, price1, ...]
+        where ts = minutes since 2011-01-01 UTC, price = cents (-1 = no data).
+        We use the last valid (timestamp, price) pair in csv[0]; timestamp is converted
+        to Unix epoch seconds via app/docs/keep_epoch.py.
+        Returns (price_in_dollars_or_none, price_updated_at_epoch_seconds_or_none).
         """
         try:
-            # Keepa stores price history in csv array
-            # csv[0] = Amazon price history: [timestamp1, price1, timestamp2, price2, ...]
-            # csv[1] = New price history: [timestamp1, price1, timestamp2, price2, ...]
-            # Prices are in cents, -1 means no data
             price_history = product.get("csv", [])
-            
             if not price_history or len(price_history) == 0:
-                return None
-            
-            # Get Amazon price history (first array, index 0)
+                return (None, None)
             amazon_price_array = price_history[0] if len(price_history) > 0 else None
-            
             if not amazon_price_array or not isinstance(amazon_price_array, list):
-                return None
-            
-            # The array contains pairs: [timestamp, price, timestamp, price, ...]
-            # We want the most recent (last) price, so iterate backwards
-            # Start from the end and look for the last valid price
-            for i in range(len(amazon_price_array) - 1, 0, -2):  # Step by 2, starting from last price
-                if i >= 1:  # Ensure we have both timestamp and price
+                return (None, None)
+            # Pairs: [timestamp, price, timestamp, price, ...]; last pair is most recent
+            for i in range(len(amazon_price_array) - 1, 0, -2):
+                if i >= 1:
                     price = amazon_price_array[i]
                     if price is not None and price != -1 and price > 0:
-                        # Keepa prices are in cents, convert to dollars
-                        return float(price) / 100.0
-            
-            # If no Amazon price found, try New price history (index 1)
+                        keepa_ts = amazon_price_array[i - 1]
+                        epoch_ts = self._keepa_minutes_to_epoch_seconds(
+                            keepa_ts if isinstance(keepa_ts, (int, float)) else None
+                        )
+                        return (float(price) / 100.0, epoch_ts)
             if len(price_history) > 1:
                 new_price_array = price_history[1]
                 if isinstance(new_price_array, list) and len(new_price_array) >= 2:
@@ -718,12 +797,20 @@ class KeepaAPIProvider(EnrichmentProvider):
                         if i >= 1:
                             price = new_price_array[i]
                             if price is not None and price != -1 and price > 0:
-                                return float(price) / 100.0
-            
-            return None
+                                keepa_ts = new_price_array[i - 1]
+                                epoch_ts = self._keepa_minutes_to_epoch_seconds(
+                                    keepa_ts if isinstance(keepa_ts, (int, float)) else None
+                                )
+                                return (float(price) / 100.0, epoch_ts)
+            return (None, None)
         except Exception as e:
-            logger.warning(f"Error extracting price from Keepa product: {e}")
-            return None
+            logger.warning(f"Error extracting price/timestamp from Keepa product: {e}")
+            return (None, None)
+
+    def _extract_keepa_price(self, product: Dict[str, Any]) -> Optional[float]:
+        """Extract current price from Keepa product data (most recent from csv[0])."""
+        price, _ = self._extract_keepa_price_and_timestamp(product)
+        return price
     
     def _extract_keepa_category(self, product: Dict[str, Any]) -> Optional[str]:
         """Extract category from Keepa product data."""
@@ -774,6 +861,7 @@ class LocalEnrichmentService:
         """
         try:
             logger.info(f"🚀 Starting background enrichment for catalog {catalog_id}")
+            logger.debug(f"enrich_catalog_products_background: params catalog_id={catalog_id}, user_id={user_id}, provider={provider}, bulk_size={bulk_size}")
             
             # Validate provider
             if provider not in self.providers:
@@ -797,6 +885,90 @@ class LocalEnrichmentService:
                 }
             )
             
+            # Ensure products exist: create stubs from catalog file if none found
+            catalog = await self.db.catalogs.find_one({
+                "_id": ObjectId(catalog_id),
+                "user_id": ObjectId(user_id)
+            })
+            if not catalog:
+                logger.error(f"Catalog {catalog_id} not found for user {user_id}")
+                await self.db.catalogs.update_one(
+                    {"_id": ObjectId(catalog_id)},
+                    {"$set": {"status": "failed", "updated_at": datetime.utcnow()}}
+                )
+                return
+            
+            existing_count = await self.db.products.count_documents({
+                "catalog_id": ObjectId(catalog_id),
+                "user_id": ObjectId(user_id)
+            })
+            
+            logger.debug(f"enrich_catalog_products_background: existing products count={existing_count} for catalog {catalog_id}")
+
+            if existing_count == 0:
+                try:
+                    logger.debug("enrich_catalog_products_background: no existing products, loading line items from catalog file")
+                    line_items = await self._get_catalog_line_items(catalog)
+                    if not line_items:
+                        logger.warning(f"Catalog file has no line items: {catalog_id}")
+                        await self.db.catalogs.update_one(
+                            {"_id": ObjectId(catalog_id)},
+                            {"$set": {"status": "completed", "enrichment_completed_at": datetime.utcnow(), "updated_at": datetime.utcnow()}}
+                        )
+                        return
+                    logger.info(f"Creating {len(line_items)} product stubs from catalog file for catalog {catalog_id}")
+                    for i, row in enumerate(line_items):
+                        try:
+                            sku = get_value(row, "sku")
+                            upc = get_value(row, "upc")
+                            if upc and isinstance(upc, str):
+                                upc = "".join(filter(str.isdigit, upc.strip())) or None
+                            qty = get_numeric_value(row, "quantity")
+                            quantity = int(qty) if qty is not None else None
+                            offer_price = get_numeric_value(row, "offer_price")
+                            logger.debug(
+                                f"Stub product {i}: sku={sku}, upc={upc}, quantity={quantity}, offer_price={offer_price}"
+                            )
+                            stub = {
+                                "catalog_id": ObjectId(catalog_id),
+                                "user_id": ObjectId(user_id),
+                                "line_item_id": f"item_{i}",
+                                "name": get_value(row, "name") or f"Item {i}",
+                                "description": get_value(row, "description"),
+                                "category": get_value(row, "category"),
+                                "brand": get_value(row, "brand"),
+                                "sku": sku,
+                                "upc": upc,
+                                "quantity": quantity,
+                                "offer_price": offer_price,
+                                "raw_data": row,
+                                "currency": get_value(row, "currency") or "USD",
+                                "unit": get_value(row, "unit") or "piece",
+                                "enrichment": {
+                                    "source": None,
+                                    "status": "pending",
+                                    "errors": [],
+                                    "data": {}
+                                },
+                                "created_at": datetime.utcnow(),
+                                "updated_at": datetime.utcnow(),
+                            }
+                            await self.db.products.insert_one(stub)
+                        except Exception as row_err:
+                            logger.exception(
+                                f"Failed to create product stub for row {i} (catalog_id={catalog_id}): {row_err}"
+                            )
+                            raise
+                except Exception as create_err:
+                    logger.exception(
+                        f"Failed to create product stubs from catalog file (catalog_id={catalog_id}): {create_err}"
+                    )
+                    await self.db.catalogs.update_one(
+                        {"_id": ObjectId(catalog_id)},
+                        {"$set": {"status": "failed", "updated_at": datetime.utcnow()}}
+                    )
+                    return
+
             # Get all products for this catalog that need enrichment
             products_cursor = self.db.products.find({
                 "catalog_id": ObjectId(catalog_id),
@@ -810,6 +982,7 @@ class LocalEnrichmentService:
             
             products = await products_cursor.to_list(None)
             total_products = len(products)
+            logger.debug(f"enrich_catalog_products_background: total products needing enrichment={total_products}")
             
             if total_products == 0:
                 logger.info(f"No products to enrich for catalog {catalog_id}")
@@ -839,99 +1012,64 @@ class LocalEnrichmentService:
                 
                 logger.info(f"🔄 Processing batch {batch_num}/{total_batches} ({len(batch)} products)")
                 
-                # Step 1: Get UPCs and enrich to get ASINs (if needed for bulk)
-                # For now, process concurrently in groups for efficiency
-                # We'll use asyncio.gather to process up to 50 products concurrently
+                # Single bulk Keepa API call for up to 50 UPCs
+                upcs = []
+                for p in batch:
+                    u = p.get("upc")
+                    if u:
+                        upcs.append(str(u).strip())
+                    else:
+                        logger.warning(f"Product {p.get('_id')} has no UPC, skipping")
                 
-                async def enrich_single_product(product: Dict[str, Any]) -> tuple:
-                    """Enrich a single product and return (product_id, success, enrichment_result)."""
-                    try:
-                        upc = product.get("upc")
-                        if not upc:
-                            logger.warning(f"Product {product.get('_id')} has no UPC, skipping")
-                            return (product["_id"], False, None)
-                        
-                        # Enrich product using Keepa API
-                        enrichment_result = await keepa_provider.enrich_item({
-                            "UPC": upc,
-                            "upc": upc
-                        })
-                        
-                        return (product["_id"], True, enrichment_result)
-                    except Exception as e:
-                        logger.error(f"Error enriching product {product.get('_id')}: {e}")
-                        return (product["_id"], False, None)
+                bulk_enriched = await keepa_provider._call_keepa_api_bulk_codes(upcs) if upcs else {}
                 
-                # Process batch concurrently
-                tasks = [enrich_single_product(product) for product in batch]
-                results = await asyncio.gather(*tasks, return_exceptions=True)
-                
-                # Step 2: Update products with enrichment data
-                for result in results:
-                    if isinstance(result, Exception):
-                        logger.error(f"Task exception: {result}")
+                for product in batch:
+                    product_id = product["_id"]
+                    upc = product.get("upc")
+                    if not upc:
                         failed_count += 1
-                        continue
-                    
-                    product_id, success, enrichment_result = result
-                    
-                    if not success or not enrichment_result:
-                        failed_count += 1
-                        # Update product with failed status
                         await self.db.products.update_one(
                             {"_id": product_id},
-                            {
-                                "$set": {
-                                    "enrichment": {
-                                        "source": provider,
-                                        "status": "failed",
-                                        "errors": ["Enrichment failed"],
-                                        "data": {}
-                                    },
-                                    "updated_at": datetime.utcnow()
-                                }
-                            }
+                            {"$set": {"enrichment": {"source": provider, "status": "failed", "errors": ["No UPC"], "data": {}}, "updated_at": datetime.utcnow()}}
+                        )
+                        continue
+                    normalized_upc = keepa_provider._normalize_upc(upc)
+                    enriched_data = bulk_enriched.get(normalized_upc) if bulk_enriched else None
+                    
+                    if not enriched_data:
+                        failed_count += 1
+                        await self.db.products.update_one(
+                            {"_id": product_id},
+                            {"$set": {"enrichment": {"source": provider, "status": "failed", "errors": ["No data from Keepa for this UPC"], "data": {}}, "updated_at": datetime.utcnow()}}
                         )
                         continue
                     
-                    # Get product to access offer_price
-                    product = await self.db.products.find_one({"_id": product_id})
-                    if not product:
-                        failed_count += 1
-                        continue
-                    
-                    # Update product with enrichment data
-                    enriched_data = enrichment_result.get("enriched_data", {})
-                    product_price = enriched_data.get("price")
-                    
-                    # Calculate profit if we have offer_price
+                    # BSON-safe copy so enrichment.data is stored correctly
+                    data_to_store = copy.deepcopy(enriched_data)
+                    product_price = data_to_store.get("price")
                     offer_price = product.get("offer_price")
                     profit = None
-                    if offer_price and product_price:
+                    if offer_price is not None and product_price is not None:
                         profit = self.calculate_profit(offer_price, product_price, cogs_percentage=0.35)
                     
-                    # Update product
+                    enrichment_payload = {
+                        "source": keepa_provider.name,
+                        "status": "completed",
+                        "errors": [],
+                        "data": data_to_store,
+                    }
                     await self.db.products.update_one(
                         {"_id": product_id},
                         {
                             "$set": {
-                                "enrichment": {
-                                    "source": enrichment_result.get("enrichment_source"),
-                                    "status": enrichment_result.get("enrichment_status", "pending"),
-                                    "errors": enrichment_result.get("enrichment_errors", []),
-                                    "data": enriched_data
-                                },
+                                "enrichment": enrichment_payload,
                                 "profit": profit,
-                                "enriched_at": enrichment_result.get("enriched_at", datetime.utcnow()),
-                                "updated_at": datetime.utcnow()
+                                "enriched_at": datetime.utcnow(),
+                                "updated_at": datetime.utcnow(),
                             }
                         }
                     )
-                    
-                    if enrichment_result.get("enrichment_status") == "completed":
-                        enriched_count += 1
-                    else:
-                        failed_count += 1
+                    enriched_count += 1
                 
                 # Update catalog enriched_items after each batch
                 await self.db.catalogs.update_one(
@@ -1145,15 +1283,19 @@ class LocalEnrichmentService:
             size = self._extract_size_from_item_data(item_data)
             
             # Extract required fields from raw_data (must exist due to CSV validation)
-            # These are saved at product level for easy access
-            sku = self._extract_field_value(item_data, ["SKU", "sku", "Article Number", "product_sku", "item_sku", "product_code", "item_code"])
-            upc = self._extract_field_value(item_data, ["UPC", "upc", "barcode", "ean", "product_upc", "item_upc"])
-            quantity = self._extract_numeric_field(item_data, ["quantity", "Quantity", "Inventory", "Quantity Available", "product_quantity", "item_quantity", "qty", "stock"])
-            offer_price = self._extract_numeric_field(item_data, ["offer_price", "Offer Price", "offer", "Offer", "Price", "price", "selling_price"])
+            # These are saved at product level for easy access (see constants.catalog_headers)
+            sku = get_value(item_data, "sku")
+            upc = get_value(item_data, "upc")
+            if upc and isinstance(upc, str):
+                upc = "".join(filter(str.isdigit, upc.strip())) or None
+            quantity = get_numeric_value(item_data, "quantity")
+            if quantity is not None:
+                quantity = int(quantity)
+            offer_price = get_numeric_value(item_data, "offer_price")
             
-            # Extract pricing fields for PO score calculation
-            whs = self._extract_numeric_field(item_data, ["WHS", "whs", "Warehouse Price", "warehouse_price", "warehouse", "cost_price"])
-            msrp = self._extract_numeric_field(item_data, ["MSRP", "msrp", "Manufacturer Recommended Retail Price", "RRP", "rrp", "Retail Price", "retail_price", "list_price"])
+            # Extract optional pricing fields for PO score calculation
+            whs = get_numeric_value(item_data, "whs")
+            msrp = get_numeric_value(item_data, "msrp")
             offer = offer_price  # Use the extracted offer_price for PO score calculation
             
             # Calculate PO score if we have the required fields
@@ -1171,17 +1313,17 @@ class LocalEnrichmentService:
                 "catalog_id": ObjectId(catalog_id),
                 "user_id": ObjectId(user_id),
                 "line_item_id": f"item_{index}",
-                "name": self._extract_field_value(item_data, ["Article Name", "Style Name", "name", "product_name", "item_name", "title", "product_title"], f"Item {index}"),
+                "name": get_value(item_data, "name") or f"Item {index}",
                 "description": self._create_description_from_excel(item_data),
-                "category": self._extract_field_value(item_data, ["Category", "Subcategory", "Division", "category", "product_category", "item_category", "type", "product_type"]),
-                "brand": self._extract_field_value(item_data, ["brand", "product_brand", "item_brand", "manufacturer", "make"]),
-                "sku": sku,  # Required field from CSV, saved at product level
-                "upc": upc,  # Required field from CSV, saved at product level
-                "price": self._extract_numeric_field(item_data, ["Offer Price", "Wholesale", "RRP", "price", "product_price", "item_price", "cost", "unit_price"]),
-                "currency": self._extract_field_value(item_data, ["Currency", "currency", "product_currency", "item_currency"], "USD"),
-                "quantity": quantity,  # Required field from CSV, saved at product level
-                "offer_price": offer_price,  # Required field from CSV, saved at product level
-                "unit": self._extract_field_value(item_data, ["unit", "product_unit", "item_unit", "uom", "measurement_unit"], "piece"),
+                "category": get_value(item_data, "category"),
+                "brand": get_value(item_data, "brand"),
+                "sku": sku,  # Required (catalog_headers)
+                "upc": upc,  # Required (catalog_headers)
+                "price": get_numeric_value(item_data, "offer_price"),  # fallback from offer_price aliases
+                "currency": get_value(item_data, "currency") or "USD",
+                "quantity": quantity,  # Required (catalog_headers)
+                "offer_price": offer_price,  # Required (catalog_headers)
+                "unit": get_value(item_data, "unit") or "piece",
                 "color": color,  # Single color (not array)
                 "size": size,  # Size - can be number (shoes) or dimensions (clothing)
                 "raw_data": item_data,
@@ -1216,25 +1358,32 @@ class LocalEnrichmentService:
     async def _get_catalog_line_items(self, catalog: Dict[str, Any]) -> List[Dict[str, Any]]:
         """Get line items from catalog file."""
         try:
+            file_path = catalog.get("file_path")
+            file_name = catalog.get("file_name")
+            logger.debug(f"_get_catalog_line_items: fetching file_path={file_path}, file_name={file_name}")
             # Get the file from S3
-            file_data = await aws_service.get_file_from_s3(catalog["file_path"])
+            file_data = await aws_service.get_file_from_s3(file_path)
             if not file_data:
                 raise Exception("Failed to retrieve catalog file from S3")
-            
+            logger.debug(f"_get_catalog_line_items: got {len(file_data)} bytes from S3, parsing by type")
             # Parse the file based on its type
-            file_name = catalog["file_name"]
-            
-            if file_name.lower().endswith('.csv'):
-                return await self._parse_csv_file(file_data)
-            elif file_name.lower().endswith('.json'):
-                return await self._parse_json_file(file_data)
+            if file_name and file_name.lower().endswith('.csv'):
+                items = await self._parse_csv_file(file_data)
+                logger.debug(f"_get_catalog_line_items: parsed {len(items)} CSV line items")
+                return items
+            elif file_name and file_name.lower().endswith('.json'):
+                items = await self._parse_json_file(file_data)
+                logger.debug(f"_get_catalog_line_items: parsed {len(items)} JSON line items")
+                return items
             elif file_name.lower().endswith('.xlsx') or file_name.lower().endswith('.xls'):
-                return await self._parse_excel_file(file_data)
+                items = await self._parse_excel_file(file_data)
+                logger.debug(f"_get_catalog_line_items: parsed {len(items)} Excel line items")
+                return items
             else:
                 raise ValueError(f"Unsupported file format: {file_name}")
                 
         except Exception as e:
-            logger.error(f"Error getting catalog line items: {e}")
+            logger.error(f"Error getting catalog line items: {e}", exc_info=True)
             # Fallback to mock data for testing
             logger.warning("Falling back to mock data due to file parsing error")
             return self._get_mock_line_items()
